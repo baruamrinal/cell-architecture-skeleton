@@ -35,9 +35,7 @@ def test_actor_from_environment_and_flag(monkeypatch: pytest.MonkeyPatch) -> Non
     ("user", "actor"),
     [("John Smith", "John-Smith"), ("DOMAIN\\jsmith", "DOMAIN-jsmith"), ("x" * 80, "x" * 64)],
 )
-def test_default_actor_is_made_safe(
-    monkeypatch: pytest.MonkeyPatch, user: str, actor: str
-) -> None:
+def test_default_actor_is_made_safe(monkeypatch: pytest.MonkeyPatch, user: str, actor: str) -> None:
     monkeypatch.setattr("cellarch.cli.cellctl.getpass.getuser", lambda: user)
     assert default_actor() == actor
 

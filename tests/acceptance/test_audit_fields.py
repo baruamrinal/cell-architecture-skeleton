@@ -35,6 +35,7 @@ def test_a25_cells_and_tenants_record_who_created_and_last_changed_them(
 
 @pytest.mark.parametrize("actor", ["has space", "a" * 65, "semi;colon", "über"])
 def test_a26_actor_names_are_validated(platform: Platform, actor: str) -> None:
-    response = platform.admin.get("/v1/cells", headers={ACTOR_HEADER: actor})
+    # Sent as raw bytes: httpx itself refuses non-ASCII strings, other clients don't.
+    response = platform.admin.get("/v1/cells", headers={ACTOR_HEADER: actor.encode("latin-1")})
 
     assert (response.status_code, response.json()["error"]) == (400, "invalid_actor")

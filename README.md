@@ -67,6 +67,9 @@ Run `cellctl` from the repo root. Optional settings (each also has a command-lin
 | `CELLCTL_URL` | `--url` | `http://localhost:8000` (control plane admin API) |
 | `CELLCTL_TOKEN` | `--token` | none; required |
 | `CELLCTL_COMPOSE_FILE` | `--compose-file` | `deploy/docker-compose.yml` (used by `cells deploy` / `decommission`) |
+| `CELLCTL_ACTOR` | `--actor` | your OS user name; recorded as who created or changed cells and tenants |
+
+**Who did what:** cells and tenants record `created_by` and `updated_by` as `admin:<your-name>`. They appear in the JSON and in a **CREATED BY** column in `cells list` and `tenants list`. Seeded cells show `config`. Records from before this feature show `unknown`. Locally the name part is self-reported, because everyone shares the admin token. On AWS (stage 5) it becomes the verified IAM identity of the caller.
 
 If `cellctl` is "not recognized", the virtual environment isn't active in that terminal. If activation fails with "running scripts is disabled", run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
 

@@ -11,3 +11,8 @@ CELL_HEADER = "X-Cell-ID"
 INTERNAL_TOKEN_HEADER = "X-Internal-Token"  # noqa: S105 - a header name, not a secret
 
 REQUEST_ID_HEADER = "X-Request-ID"
+
+# Name of the person or system calling the admin API (sent by cellctl). Recorded as
+# created_by / updated_by next to the verified credential role. Self-reported locally;
+# replaced by the verified IAM identity on AWS (stage 5).
+ACTOR_HEADER = "X-Actor"
