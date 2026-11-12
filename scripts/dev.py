@@ -23,6 +23,8 @@ import os
 import socket
 import subprocess
 import sys
+import time
+import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -52,6 +54,7 @@ PLATFORM_IMAGES = ["router", "control-plane"]
 # Every cell runs its gateway and its tenants' services.
 CELL_IMAGES = ["cell-gateway", "user-account", "order-processing"]
 ROUTER_PORT, CONTROL_PLANE_PORT = 8080, 8000
+READY_TIMEOUT_SECONDS, READY_POLL_SECONDS = 120, 2
 
 Runner = Callable[[Sequence[str], Mapping[str, str]], int]
 
@@ -78,6 +81,15 @@ def port_in_use(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.5)
         return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def answers(url: str) -> bool:
+    """True if ``url`` answers HTTP 200."""
+    try:
+        with urllib.request.urlopen(url, timeout=3) as response:  # noqa: S310 - local URL
+            return bool(response.status == 200)
+    except (OSError, ValueError):  # refused, reset, timeout, HTTP errors
+        return False
 
 
 def load_env(root: Path) -> dict[str, str] | None:
@@ -182,6 +194,8 @@ def up(
     clusters: ClusterToolkit,
     env: Mapping[str, str],
     port_check: Callable[[int], bool],
+    probe: Callable[[str], bool] = answers,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     seeds = seed_cells(env)
     existing = clusters.clusters()
@@ -225,6 +239,20 @@ def up(
     clusters.helm_upgrade(
         PLATFORM, RELEASE, root / "charts" / "platform", platform_values(env, seeds)
     )
+    # helm --wait covers our pods, not k3s's load balancer in front of them.
+    health = f"http://127.0.0.1:{CONTROL_PLANE_PORT}/healthz"
+    waited = 0.0
+    while not probe(health):
+        if waited >= READY_TIMEOUT_SECONDS:
+            print(
+                f"error: the control plane did not answer at {health} within "
+                f"{READY_TIMEOUT_SECONDS}s; see `kubectl --context k3d-cellarch-platform "
+                "get pods -A`",
+                file=sys.stderr,
+            )
+            return 1
+        sleep(READY_POLL_SECONDS)
+        waited += READY_POLL_SECONDS
     print(
         f"\nPlatform is up: router http://localhost:{ROUTER_PORT}, "
         f"control plane http://localhost:{CONTROL_PLANE_PORT}\n"
@@ -239,6 +267,8 @@ def main(
     run: Runner | None = None,
     clusters: ClusterToolkit | None = None,
     port_in_use: Callable[[int], bool] = port_in_use,
+    answers: Callable[[str], bool] = answers,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     target = args[0] if args else "help"
@@ -289,7 +319,7 @@ def main(
         if target == "test":
             return run([str(venv_python(root)), "-m", "pytest", "--cov"], env)
         if target == "up":
-            return up(root, run, k3d, env, port_in_use)
+            return up(root, run, k3d, env, port_in_use, answers, sleep)
         return run([str(venv_python(root)), "-m", "cellarch.cli.cellctl", "status"], env)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
