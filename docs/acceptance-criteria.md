@@ -37,9 +37,9 @@ What each delivery stage must do, in plain language. The precise, executable ver
 | A19 | a cell hosting 2 tenants | its capacity is set below 2, or raised | lowering below the tenant count fails with `409 capacity_below_tenants`; raising succeeds |
 | A20 | one cell with tenants and one without | each is decommissioned | the cell with tenants is refused (`409 cell_not_empty`); the empty cell and its credential are removed |
 | A21 | cells filling up | the platform status is read | it shows totals (cells, placeable cells, tenants, capacity, free slots) and warns `capacity_low` past the 75% target and `no_capacity` when full |
-| A22 | the local Docker stack | `cellctl cells deploy <cell-id>` is run | a container is started with a generated credential, registered, and ready for tenants in one step |
-| A23 | a deployed container that never becomes healthy | `cellctl cells deploy` runs | the container and its generated file are removed and nothing is registered (exit code `1`) |
-| A24 | a cell deployed with `cellctl` and no tenants | `cellctl cells decommission <cell-id> --delete-data` is run | it is deregistered, its container stopped and its data volume removed |
+| A22 | the local k3d platform | `cellctl cells deploy <cell-id>` is run | a new cell **cluster** is created, the cell chart is installed with a generated credential, the cell is reachable by name (`<cell-id>.cellarch.internal`), registered, and ready for tenants in one step |
+| A23 | a new cell whose gateway never answers | `cellctl cells deploy` runs | its cluster and DNS name are removed again and nothing is registered (exit code `1`) |
+| A24 | a cell deployed with `cellctl` and no tenants | `cellctl cells decommission <cell-id> --delete-data` is run | it is deregistered and its cluster deleted with its data (without `--delete-data` the cluster is only stopped) |
 
 ### Who created and changed what
 

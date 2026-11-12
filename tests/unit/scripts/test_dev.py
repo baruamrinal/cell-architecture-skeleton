@@ -82,7 +82,7 @@ class FakeClusters:
     def delete_network(self) -> None:
         self._record("delete-network")
 
-    def helm(self, short: str) -> dict[str, Any]:
+    def helm(self, short: str) -> tuple[Any, ...]:
         return next(c for c in self.calls if c[0] == "helm" and c[1] == short)
 
 
@@ -115,7 +115,7 @@ def up(root: Path, clusters: FakeClusters, run: FakeRunner | None = None, **kw: 
 
 class TestParseEnv:
     def test_parses_values_comments_quotes_and_export(self) -> None:
-        text = "# c\n\nADMIN_TOKEN=abc\nexport ROUTER_TOKEN=def\nQUOTED=\"a b\"\nEMPTY=\n"
+        text = '# c\n\nADMIN_TOKEN=abc\nexport ROUTER_TOKEN=def\nQUOTED="a b"\nEMPTY=\n'
         assert dev.parse_env(text) == {
             "ADMIN_TOKEN": "abc",
             "ROUTER_TOKEN": "def",
@@ -180,11 +180,19 @@ class TestUp:
         assert up(root, clusters, run) == 0
 
         assert clusters.calls[0] == ("network",)
-        assert clusters.calls[1] == ("cluster", "platform", ("127.0.0.1:8080:8080", "127.0.0.1:8000:8000"))
+        assert clusters.calls[1] == (
+            "cluster",
+            "platform",
+            ("127.0.0.1:8080:8080", "127.0.0.1:8000:8000"),
+        )
         assert clusters.calls[2] == ("cluster", "cell-1", ())
         builds = [c for c in run.commands if c[:2] == ["docker", "build"]]
         assert [c[3] for c in builds] == dev.IMAGES
-        assert ("import", "platform", ("cellarch/router:dev", "cellarch/control-plane:dev")) in clusters.calls
+        assert (
+            "import",
+            "platform",
+            ("cellarch/router:dev", "cellarch/control-plane:dev"),
+        ) in clusters.calls
         assert ("import", "cell-1", ("cellarch/cell-gateway:dev",)) in clusters.calls
 
         cell = clusters.helm("cell-1")
@@ -195,7 +203,9 @@ class TestUp:
         platform = clusters.helm("platform")[4]
         assert platform["secrets"]["adminToken"] == "a-secret"
         assert platform["secrets"]["cellCredentials"] == {"cell-1": "c1-secret"}
-        assert platform["controlPlane"]["seedCells"] == {"cell-1": "http://cell-1.cellarch.internal:8000"}
+        assert platform["controlPlane"]["seedCells"] == {
+            "cell-1": "http://cell-1.cellarch.internal:8000"
+        }
         assert platform["router"]["service"] == {"type": "LoadBalancer", "port": 8080}
         assert platform["controlPlane"]["service"] == {"type": "LoadBalancer", "port": 8000}
         assert platform["redis"] == {"enabled": False}
@@ -209,7 +219,10 @@ class TestUp:
         clusters = FakeClusters()
         assert up(root, clusters) == 0
         assert clusters.helm("cell-2")[4]["secrets"]["internalToken"] == "dev-cell-2-token"
-        assert set(clusters.helm("platform")[4]["controlPlane"]["seedCells"]) == {"cell-1", "cell-2"}
+        assert set(clusters.helm("platform")[4]["controlPlane"]["seedCells"]) == {
+            "cell-1",
+            "cell-2",
+        }
 
     def test_cells_added_with_cellctl_are_updated_and_keep_their_values(self, root: Path) -> None:
         make_venv(root)
@@ -221,7 +234,17 @@ class TestUp:
         assert set(dns) == {"cell-1", "cell-7"}
         assert "cell-7" not in clusters.helm("platform")[4]["controlPlane"]["seedCells"]
 
+    def test_tier_limits_and_capacity_from_env(self, root: Path) -> None:
+        make_venv(root)
+        (root / ".env").write_text("RATE_LIMIT_STANDARD=5:10\nDEFAULT_CELL_CAPACITY=8\n")
+        clusters = FakeClusters()
+        up(root, clusters)
+        control_plane = clusters.helm("platform")[4]["controlPlane"]
+        assert control_plane["rateLimits"] == {"standard": "5:10"}
+        assert control_plane["defaultCellCapacity"] == 8
+
     def test_redis_backend(self, root: Path) -> None:
+
         make_venv(root)
         (root / ".env").write_text("RATE_LIMIT_BACKEND=redis\n")
         clusters = FakeClusters()
@@ -272,7 +295,9 @@ class TestUp:
 
 class TestOtherTargets:
     def call(self, target: str, root: Path, clusters: FakeClusters, run: FakeRunner) -> int:
-        return dev.main([target], root=root, run=run, clusters=clusters, port_in_use=lambda p: False)
+        return dev.main(
+            [target], root=root, run=run, clusters=clusters, port_in_use=lambda p: False
+        )
 
     def test_down_stops_running_clusters_and_keeps_data(self, root: Path) -> None:
         clusters = FakeClusters({"platform": "running", "cell-1": "running", "cell-2": "stopped"})
@@ -313,7 +338,11 @@ class TestOtherTargets:
 
     @pytest.mark.parametrize(
         ("env_file", "token"),
-        [(None, "dev-admin-token"), ("ADMIN_TOKEN=x\n", "x"), ("ADMIN_TOKEN=a\nCELLCTL_TOKEN=y\n", "y")],
+        [
+            (None, "dev-admin-token"),
+            ("ADMIN_TOKEN=x\n", "x"),
+            ("ADMIN_TOKEN=a\nCELLCTL_TOKEN=y\n", "y"),
+        ],
     )
     def test_token_target(
         self, root: Path, capsys: pytest.CaptureFixture[str], env_file: str | None, token: str

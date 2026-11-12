@@ -20,7 +20,7 @@ import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 NETWORK = "cellarch"
 PREFIX = "cellarch-"
@@ -71,6 +71,30 @@ def cell_host(cell_id: str) -> str:
 def cell_url(cell_id: str) -> str:
     """Address the router and control plane use to reach a cell's gateway."""
     return f"http://{cell_host(cell_id)}:{CELL_PORT}"
+
+
+class ClusterToolkit(Protocol):
+    """What `make up` and `cellctl` need from the local cluster runtime."""
+
+    def clusters(self) -> dict[str, str]: ...
+    def cell_ids(self) -> list[str]: ...
+    def ensure_network(self) -> None: ...
+    def ensure_cluster(self, short: str, *, ports: Iterable[str] = ()) -> None: ...
+    def stop(self, short: str) -> None: ...
+    def delete(self, short: str) -> None: ...
+    def delete_network(self) -> None: ...
+    def import_images(self, short: str, images: Sequence[str]) -> None: ...
+    def node_ip(self, short: str) -> str: ...
+    def helm_upgrade(
+        self,
+        short: str,
+        release: str,
+        chart: Path,
+        values: Mapping[str, Any],
+        *,
+        reuse_values: bool = False,
+    ) -> None: ...
+    def set_cell_dns(self, entries: Mapping[str, str]) -> bool: ...
 
 
 class LocalClusters:
@@ -174,17 +198,12 @@ class LocalClusters:
         finally:
             Path(path).unlink(missing_ok=True)
 
-    def helm_uninstall(self, short: str, release: str) -> None:
-        self._exec(["helm", "uninstall", release, "--kube-context", context(short)])
-
     # --- cell DNS in the platform cluster ------------------------------------------------
 
     @staticmethod
     def dns_zone(entries: Mapping[str, str]) -> str:
         hosts = "\n".join(f"        {ip} {cell_host(cell)}" for cell, ip in sorted(entries.items()))
-        return (
-            f"{DNS_ZONE}:53 {{\n    hosts {{\n{hosts}\n        fallthrough\n    }}\n}}\n"
-        )
+        return f"{DNS_ZONE}:53 {{\n    hosts {{\n{hosts}\n        fallthrough\n    }}\n}}\n"
 
     def set_cell_dns(self, entries: Mapping[str, str]) -> bool:
         """Point <cell>.cellarch.internal at each cell's node; returns whether it changed."""

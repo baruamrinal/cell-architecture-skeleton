@@ -16,8 +16,8 @@ Overview
     cellctl status
 
 Configuration: --url / CELLCTL_URL (default http://localhost:8000), --token / CELLCTL_TOKEN
-(the admin credential) and, for deploy/decommission, --compose-file / CELLCTL_COMPOSE_FILE
-(default deploy/docker-compose.yml). On AWS, stage 5 adds IAM signing and stage 6 makes
+(the admin credential) and, for deploy, --charts-dir / CELLCTL_CHARTS_DIR (default charts).
+Each cell is its own local k3d cluster. On AWS, stage 5 adds IAM signing and stage 6 makes
 deploy trigger the cell-lifecycle workflow.
 """
 
@@ -34,15 +34,12 @@ from typing import Any
 
 import httpx
 
-from cellarch.cli.docker import (
-    DEFAULT_IMAGE,
-    DockerError,
-    DockerRunner,
-    LocalDocker,
-    cell_compose_file,
-    cell_compose_spec,
+from cellarch.cli.clusters import (
+    ClusterError,
+    ClusterToolkit,
+    LocalClusters,
     cell_url,
-    volume_name,
+    cluster_name,
 )
 from cellarch.common.contracts import is_valid_tenant_id
 from cellarch.common.dotenv import load_env_file
@@ -51,7 +48,7 @@ from cellarch.common.headers import ACTOR_HEADER, INTERNAL_TOKEN_HEADER
 DEFAULT_URL = "http://localhost:8000"
 DEFAULT_ROUTER_URL = "http://localhost:8080"
 _UNSAFE_ACTOR_CHARS = re.compile(r"[^A-Za-z0-9._@-]+")
-DEFAULT_COMPOSE_FILE = "deploy/docker-compose.yml"
+DEFAULT_CHARTS_DIR = "charts"
 EXIT_OK, EXIT_ERROR, EXIT_USAGE = 0, 1, 2
 
 
@@ -158,9 +155,9 @@ def _parser(settings: Mapping[str, str]) -> argparse.ArgumentParser:
         help="your name, recorded as created_by/updated_by (default: your OS user name)",
     )
     parser.add_argument(
-        "--compose-file",
-        default=settings.get("CELLCTL_COMPOSE_FILE", DEFAULT_COMPOSE_FILE),
-        help="local compose stack used by `cells deploy` and `cells decommission`",
+        "--charts-dir",
+        default=settings.get("CELLCTL_CHARTS_DIR", DEFAULT_CHARTS_DIR),
+        help="Helm charts used by `cells deploy` (default: charts)",
     )
     resources = parser.add_subparsers(dest="resource", required=True)
 
@@ -170,10 +167,10 @@ def _parser(settings: Mapping[str, str]) -> argparse.ArgumentParser:
     cells.add_parser("list", help="list cells")
     cells.add_parser("get", help="show one cell").add_argument("cell_id")
 
-    deploy = cells.add_parser("deploy", help="start a new cell container and register it")
+    deploy = cells.add_parser("deploy", help="create a new cell cluster and register it")
     deploy.add_argument("cell_id")
     _cell_options(deploy)
-    deploy.add_argument("--image", default=DEFAULT_IMAGE, help=f"default: {DEFAULT_IMAGE}")
+    deploy.add_argument("--image", default=GATEWAY_IMAGE, help=f"default: {GATEWAY_IMAGE}")
 
     register = cells.add_parser("register", help="register a cell deployed some other way")
     register.add_argument("cell_id")
@@ -282,24 +279,30 @@ def _request(args: argparse.Namespace) -> tuple[str, str, dict[str, Any] | None]
             return "POST", "/v1/tenants", body
 
 
-# --- cell deploy / decommission (local Docker) ------------------------------------------
+# --- cell deploy / decommission (local k3d: one cluster per cell) -----------------------
+
+CELL_RELEASE = "cellarch"
+GATEWAY_IMAGE = "cellarch/cell-gateway:dev"
 
 
 def _progress(message: str) -> None:
     print(message, file=sys.stderr)
 
 
-def _deploy(args: argparse.Namespace, api: Api, docker: DockerRunner) -> Any:
+def _sync_cell_dns(clusters: ClusterToolkit) -> None:
+    clusters.set_cell_dns({cell: clusters.node_ip(cell) for cell in clusters.cell_ids()})
+
+
+def _deploy(args: argparse.Namespace, api: Api, clusters: ClusterToolkit) -> Any:
     cell_id = args.cell_id
     if not is_valid_tenant_id(cell_id):
         raise UsageError(
             f"invalid cell id {cell_id!r}: use 2-63 lowercase letters, digits and hyphens"
         )
-    compose_file = Path(args.compose_file)
-    if not compose_file.is_file():
+    chart = Path(args.charts_dir) / "cell"
+    if not chart.is_dir():
         raise UsageError(
-            f"compose file not found: {compose_file} (run from the repo root or pass "
-            "--compose-file)"
+            f"chart not found: {chart} (run from the project folder or pass --charts-dir)"
         )
     try:
         api.call("GET", f"/v1/cells/{cell_id}")
@@ -308,64 +311,59 @@ def _deploy(args: argparse.Namespace, api: Api, docker: DockerRunner) -> Any:
             raise
     else:
         raise CommandError("cell_exists", f"cell {cell_id} is already registered", 409)
+    if cell_id in clusters.clusters():
+        raise CommandError(
+            "cell_cluster_exists",
+            f"cluster {cluster_name(cell_id)} already exists; decommission it first",
+        )
 
     credential = secrets.token_urlsafe(32)
-    spec_path = cell_compose_file(compose_file, cell_id)
-    spec_path.parent.mkdir(parents=True, exist_ok=True)
-    spec_path.write_text(
-        json.dumps(cell_compose_spec(cell_id, credential, args.image), indent=2),
-        encoding="utf-8",
-    )
-    files = [compose_file, spec_path]
-    volume_existed = docker.volume_exists(volume_name(cell_id))
-
     try:
-        _progress(f"Starting container {cell_id} and waiting until it is healthy...")
-        docker.compose(files, "up", "--detach", "--wait", "--wait-timeout", "180", cell_id)
+        _progress(f"Creating cluster {cluster_name(cell_id)}...")
+        clusters.ensure_cluster(cell_id)
+        clusters.import_images(cell_id, [args.image])
+        _progress("Installing the cell chart and waiting until the gateway is ready...")
+        values = {"cellId": cell_id, "secrets": {"internalToken": credential}}
+        clusters.helm_upgrade(cell_id, CELL_RELEASE, chart, values)
+        _sync_cell_dns(clusters)
         _progress(f"Registering {cell_id} with the control plane...")
         cell = api.call(
             "POST", "/v1/cells", {**_cell_body(args, cell_url(cell_id)), "credential": credential}
         )
-    except (CommandError, DockerError):
-        _progress(f"Deploy failed; removing {cell_id}...")
+    except (CommandError, ClusterError):
+        _progress(f"Deploy failed; removing cluster {cluster_name(cell_id)}...")
         try:
-            docker.compose(files, "rm", "--stop", "--force", cell_id)
-            if not volume_existed:
-                docker.remove_volume(volume_name(cell_id))
-        except DockerError as cleanup_error:
+            clusters.delete(cell_id)
+            _sync_cell_dns(clusters)
+        except ClusterError as cleanup_error:
             _progress(f"warning: cleanup incomplete: {cleanup_error}")
-        spec_path.unlink(missing_ok=True)
         raise
-    _progress(f"Cell {cell_id} is deployed and ready for tenants.")
+    _progress(f"Cell {cell_id} is deployed in its own cluster and ready for tenants.")
     return cell
 
 
-def _decommission(args: argparse.Namespace, api: Api, docker: DockerRunner) -> Any:
+def _decommission(args: argparse.Namespace, api: Api, clusters: ClusterToolkit) -> Any:
     cell_id = args.cell_id
-    compose_file = Path(args.compose_file)
-    spec_path = cell_compose_file(compose_file, cell_id)
-
     api.call("DELETE", f"/v1/cells/{cell_id}")
     _progress(f"{cell_id} deregistered from the control plane.")
-    if not spec_path.is_file():
-        _progress(
-            f"note: {cell_id} was not deployed by cellctl; stop its container"
-            + (" and delete its data" if args.delete_data else "")
-            + " yourself."
-        )
-        return {"cell_id": cell_id, "decommissioned": True, "container_removed": False}
+    if cell_id not in clusters.clusters():
+        _progress(f"note: no local cluster {cluster_name(cell_id)}; nothing else to remove.")
+        return {"cell_id": cell_id, "decommissioned": True, "cluster": "none"}
 
-    docker.compose([compose_file, spec_path], "rm", "--stop", "--force", cell_id)
     if args.delete_data:
-        docker.remove_volume(volume_name(cell_id))
-    spec_path.unlink()
-    _progress(f"Container {cell_id} removed" + (" with its data." if args.delete_data else "."))
-    return {
-        "cell_id": cell_id,
-        "decommissioned": True,
-        "container_removed": True,
-        "data_deleted": args.delete_data,
-    }
+        clusters.delete(cell_id)
+        outcome = "deleted"
+    else:
+        clusters.stop(cell_id)
+        outcome = "stopped"
+    # A stopped cluster is still listed, so leave this cell out of the DNS zone explicitly.
+    remaining = [cell for cell in clusters.cell_ids() if cell != cell_id]
+    clusters.set_cell_dns({cell: clusters.node_ip(cell) for cell in remaining})
+    _progress(
+        f"Cluster {cluster_name(cell_id)} "
+        + ("deleted with its data." if outcome == "deleted" else "stopped; its data is kept.")
+    )
+    return {"cell_id": cell_id, "decommissioned": True, "cluster": outcome}
 
 
 # --- output -----------------------------------------------------------------------------
@@ -484,7 +482,7 @@ def main(
     *,
     client: httpx.Client | None = None,
     token: str | None = None,
-    docker: DockerRunner | None = None,
+    clusters: ClusterToolkit | None = None,
     router_client: httpx.Client | None = None,
 ) -> int:
     try:
@@ -511,9 +509,9 @@ def main(
     action = (args.resource, getattr(args, "action", None))
     try:
         if action == ("cells", "deploy"):
-            data = _deploy(args, api, docker or LocalDocker())
+            data = _deploy(args, api, clusters or LocalClusters())
         elif action == ("cells", "decommission"):
-            data = _decommission(args, api, docker or LocalDocker())
+            data = _decommission(args, api, clusters or LocalClusters())
         else:
             data = api.call(*_request(args))
     except UsageError as exc:
@@ -523,7 +521,7 @@ def main(
         status = f" (HTTP {exc.status})" if exc.status else ""
         print(f"error: {exc.code}: {exc.message}{status}", file=sys.stderr)
         return EXIT_ERROR
-    except DockerError as exc:
+    except ClusterError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERROR
 

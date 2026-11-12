@@ -129,95 +129,114 @@ def test_a21_status_summarises_capacity_and_warns_before_it_runs_out(platform: P
     assert full["cells"][0]["utilization"] == 1.0
 
 
-# --- cellctl cells deploy / decommission (Docker runner faked) ---------------------------
+# --- cellctl cells deploy / decommission (cluster toolkit faked) ------------------------
 
 
-class FakeDocker:
-    """Stands in for the Docker CLI: `up` starts the cell in the in-process platform."""
+class FakeClusters:
+    """Stands in for k3d/Helm: installing the cell chart starts a real in-process cell."""
 
-    def __init__(self, platform: Platform, *, container_starts: bool = True) -> None:
+    def __init__(self, platform: Platform, *, gateway_comes_up: bool = True) -> None:
         self.platform = platform
-        self.container_starts = container_starts
-        self.calls: list[tuple[str, ...]] = []
+        self.gateway_comes_up = gateway_comes_up
+        self.existing: dict[str, str] = {"platform": "running"}
+        self.calls: list[tuple[Any, ...]] = []
 
-    def compose(self, files: Sequence[Path], *args: str) -> None:
-        self.calls.append(("compose", *args))
-        cell_id = args[-1]
-        if args[0] == "up" and self.container_starts:
-            spec = json.loads(files[-1].read_text(encoding="utf-8"))
-            environment = spec["services"][cell_id]["environment"]
-            self.platform.start_cell(environment["CELL_ID"], environment["CELL_INTERNAL_TOKEN"])
-        if args[0] == "rm":
-            self.platform.stop_cell(cell_id)
+    def clusters(self) -> dict[str, str]:
+        return dict(self.existing)
 
-    def volume_exists(self, name: str) -> bool:
-        return False
+    def cell_ids(self) -> list[str]:
+        return sorted(c for c in self.existing if c != "platform")
 
-    def remove_volume(self, name: str) -> None:
-        self.calls.append(("volume-rm", name))
+    def ensure_cluster(self, short: str, **kwargs: Any) -> None:
+        self.calls.append(("cluster", short))
+        self.existing[short] = "running"
+
+    def import_images(self, short: str, images: Sequence[str]) -> None:
+        self.calls.append(("import", short))
+
+    def helm_upgrade(self, short: str, release: str, chart: Path, values: Any, **kw: Any) -> None:
+        self.calls.append(("helm", short))
+        if self.gateway_comes_up:
+            self.platform.start_cell(values["cellId"], values["secrets"]["internalToken"])
+
+    def ensure_network(self) -> None:
+        pass
+
+    def delete_network(self) -> None:
+        pass
+
+    def node_ip(self, short: str) -> str:
+        return "172.20.0.9"
+
+    def set_cell_dns(self, entries: Any) -> bool:
+        self.calls.append(("dns", tuple(sorted(entries))))
+        return True
+
+    def stop(self, short: str) -> None:
+        self.calls.append(("stop", short))
+        self.existing[short] = "stopped"
+        self.platform.stop_cell(short)
+
+    def delete(self, short: str) -> None:
+        self.calls.append(("delete", short))
+        self.existing.pop(short, None)
+        self.platform.stop_cell(short)
 
 
 @pytest.fixture
-def compose_file(tmp_path: Path) -> Path:
-    path = tmp_path / "deploy" / "docker-compose.yml"
-    path.parent.mkdir()
-    path.write_text("name: cellarch\n", encoding="utf-8")
-    return path
+def charts(tmp_path: Path) -> Path:
+    (tmp_path / "charts" / "cell").mkdir(parents=True)
+    return tmp_path / "charts"
 
 
-def cellctl(platform: Platform, docker: FakeDocker, compose_file: Path, *args: str) -> int:
+def cellctl(platform: Platform, clusters: FakeClusters, charts: Path, *args: str) -> int:
     return cellctl_main(
-        ["--compose-file", str(compose_file), *args],
+        ["--charts-dir", str(charts), *args],
         client=platform.admin,
         token=ADMIN_TOKEN,
-        docker=docker,
+        clusters=clusters,
     )
 
 
-def test_a22_cellctl_deploy_starts_and_registers_a_cell_in_one_step(
-    platform: Platform, compose_file: Path, capsys: pytest.CaptureFixture[str]
+def test_a22_cellctl_deploy_creates_a_cell_cluster_and_registers_it_in_one_step(
+    platform: Platform, charts: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    docker = FakeDocker(platform)
+    clusters = FakeClusters(platform)
 
-    code = cellctl(platform, docker, compose_file, "cells", "deploy", "cell-4", "--capacity", "6")
+    code = cellctl(platform, clusters, charts, "cells", "deploy", "cell-4", "--capacity", "6")
 
     assert code == 0
     cell = json.loads(capsys.readouterr().out)
     assert (cell["cell_id"], cell["status"], cell["capacity"]) == ("cell-4", "active", 6)
+    assert cell["url"] == "http://cell-4.cellarch.internal:8000"
+    assert [c[0] for c in clusters.calls] == ["cluster", "import", "helm", "dns"]
     assert platform.onboard("acme") == "cell-4"
     assert platform.as_tenant("acme", "GET", "/v1/items").headers[CELL_HEADER] == "cell-4"
-    spec = json.loads((compose_file.parent / "cells" / "cell-4.yml").read_text(encoding="utf-8"))
-    token = spec["services"]["cell-4"]["environment"]["CELL_INTERNAL_TOKEN"]
-    assert len(token) >= 32  # generated, not a hand-picked token
-    assert token not in json.dumps(cell)
 
 
 def test_a23_cellctl_deploy_cleans_up_when_the_cell_does_not_come_up(
-    platform: Platform, compose_file: Path
+    platform: Platform, charts: Path
 ) -> None:
-    docker = FakeDocker(platform, container_starts=False)
+    clusters = FakeClusters(platform, gateway_comes_up=False)
 
-    code = cellctl(platform, docker, compose_file, "cells", "deploy", "cell-4")
+    code = cellctl(platform, clusters, charts, "cells", "deploy", "cell-4")
 
     assert code == 1
-    assert any(call[:2] == ("compose", "rm") for call in docker.calls)
-    assert ("volume-rm", "cellarch_cell-4-data") in docker.calls
-    assert not (compose_file.parent / "cells" / "cell-4.yml").exists()
+    assert ("delete", "cell-4") in clusters.calls
+    assert "cell-4" not in clusters.existing
+    assert clusters.calls[-1] == ("dns", ())
     assert platform.admin.get("/v1/cells/cell-4").status_code == 404
 
 
-def test_a24_cellctl_decommission_deregisters_and_removes_the_container(
-    platform: Platform, compose_file: Path
+def test_a24_cellctl_decommission_deregisters_and_removes_the_cluster(
+    platform: Platform, charts: Path
 ) -> None:
-    docker = FakeDocker(platform)
-    assert cellctl(platform, docker, compose_file, "cells", "deploy", "cell-4") == 0
+    clusters = FakeClusters(platform)
+    assert cellctl(platform, clusters, charts, "cells", "deploy", "cell-4") == 0
 
-    code = cellctl(
-        platform, docker, compose_file, "cells", "decommission", "cell-4", "--delete-data"
-    )
+    code = cellctl(platform, clusters, charts, "cells", "decommission", "cell-4", "--delete-data")
 
     assert code == 0
     assert platform.admin.get("/v1/cells/cell-4").status_code == 404
-    assert ("volume-rm", "cellarch_cell-4-data") in docker.calls
+    assert ("delete", "cell-4") in clusters.calls
     assert not platform.cells["cell-4"].reachable
-    assert not (compose_file.parent / "cells" / "cell-4.yml").exists()

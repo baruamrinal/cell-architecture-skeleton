@@ -107,7 +107,7 @@ def test_helm_values_go_in_a_temporary_file_never_on_the_command_line() -> None:
     toolkit(runner).helm_upgrade(
         "cell-1", "cell", Path("charts/cell"), {"secrets": {"internalToken": "top-secret"}}
     )
-    (cmd, _), = runner.calls
+    ((cmd, _),) = runner.calls
     joined = " ".join(cmd)
     assert "top-secret" not in joined
     assert "--kube-context k3d-cellarch-cell-1" in joined
@@ -159,6 +159,8 @@ def test_import_images_stop_and_delete() -> None:
         "k3d cluster stop cellarch-cell-1",
         "k3d cluster delete cellarch-cell-1",
     ]
+    clusters.delete_network()
+    assert runner.commands()[-1] == "docker network rm cellarch"
 
 
 def test_failures_raise_with_the_tool_output() -> None:

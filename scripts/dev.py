@@ -17,6 +17,7 @@ Standard library only, so it runs before the virtual environment exists.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import socket
@@ -29,7 +30,13 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 # Shared with cellctl; standard library only, so importable before .venv exists.
 sys.path.insert(0, str(ROOT / "src"))
-from cellarch.cli.clusters import PLATFORM, ClusterError, LocalClusters, cell_url  # noqa: E402
+from cellarch.cli.clusters import (  # noqa: E402
+    PLATFORM,
+    ClusterError,
+    ClusterToolkit,
+    LocalClusters,
+    cell_url,
+)
 from cellarch.common.contracts import is_valid_tenant_id  # noqa: E402
 from cellarch.common.dotenv import load_env_file, parse_env  # noqa: E402
 
@@ -168,7 +175,7 @@ def build_images(root: Path, run: Runner, env: Mapping[str, str]) -> int:
 def up(
     root: Path,
     run: Runner,
-    clusters: LocalClusters,
+    clusters: ClusterToolkit,
     env: Mapping[str, str],
     port_check: Callable[[int], bool],
 ) -> int:
@@ -221,13 +228,13 @@ def main(
     *,
     root: Path = ROOT,
     run: Runner | None = None,
-    clusters: LocalClusters | None = None,
+    clusters: ClusterToolkit | None = None,
     port_in_use: Callable[[int], bool] = port_in_use,
 ) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     target = args[0] if args else "help"
     run = run or _process_runner(root)
-    k3d = clusters or LocalClusters()
+    k3d: ClusterToolkit = clusters or LocalClusters()
 
     if target == "help":
         print(HELP)
@@ -262,10 +269,8 @@ def main(
         if target == "clean":
             for name in sorted(k3d.clusters()):
                 k3d.delete(name)
-            try:
+            with contextlib.suppress(ClusterError):  # no network: nothing to remove
                 k3d.delete_network()
-            except ClusterError:
-                pass  # no network: nothing to remove
             print("Clusters and their data deleted.")
             return 0
 
