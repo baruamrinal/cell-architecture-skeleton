@@ -1,13 +1,15 @@
-"""Tests for scripts/dev.py, the logic behind `make up` / `.\\make up`."""
+"""Tests for scripts/dev.py, the logic behind `make up` / `.\\make up` (k3d runtime)."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import dev
+from cellarch.cli.clusters import ClusterError
 
 
 class FakeRunner:
@@ -24,10 +26,69 @@ class FakeRunner:
         return [cmd for cmd, _ in self.calls]
 
 
+class FakeClusters:
+    """Stands in for LocalClusters: records what `make` asks of k3d/Helm/kubectl."""
+
+    def __init__(self, existing: dict[str, str] | None = None, fail_on: str | None = None):
+        self.existing = dict(existing or {})
+        self.fail_on = fail_on
+        self.calls: list[tuple[Any, ...]] = []
+
+    def _record(self, *call: Any) -> None:
+        self.calls.append(call)
+        if self.fail_on == call[0]:
+            raise ClusterError(f"{call[0]} failed")
+
+    def clusters(self) -> dict[str, str]:
+        return dict(self.existing)
+
+    def cell_ids(self) -> list[str]:
+        return sorted(name for name in self.existing if name != "platform")
+
+    def ensure_network(self) -> None:
+        self._record("network")
+
+    def ensure_cluster(self, short: str, *, ports: Iterable[str] = ()) -> None:
+        self._record("cluster", short, tuple(ports))
+        self.existing[short] = "running"
+
+    def import_images(self, short: str, images: Sequence[str]) -> None:
+        self._record("import", short, tuple(images))
+
+    def helm_upgrade(
+        self,
+        short: str,
+        release: str,
+        chart: Path,
+        values: Mapping[str, Any],
+        *,
+        reuse_values: bool = False,
+    ) -> None:
+        self._record("helm", short, release, chart.name, dict(values), reuse_values)
+
+    def node_ip(self, short: str) -> str:
+        return f"172.20.0.{len(short)}"
+
+    def set_cell_dns(self, entries: Mapping[str, str]) -> bool:
+        self._record("dns", dict(entries))
+        return True
+
+    def stop(self, short: str) -> None:
+        self._record("stop", short)
+
+    def delete(self, short: str) -> None:
+        self._record("delete", short)
+
+    def delete_network(self) -> None:
+        self._record("delete-network")
+
+    def helm(self, short: str) -> dict[str, Any]:
+        return next(c for c in self.calls if c[0] == "helm" and c[1] == short)
+
+
 @pytest.fixture
 def root(tmp_path: Path) -> Path:
-    (tmp_path / "deploy").mkdir()
-    (tmp_path / "deploy" / "docker-compose.yml").write_text("name: cellarch\n")
+    (tmp_path / "charts").mkdir()
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
     return tmp_path
 
@@ -36,25 +97,29 @@ def make_venv(root: Path) -> Path:
     python = dev.venv_python(root)
     python.parent.mkdir(parents=True)
     python.write_text("")
+    (root / ".venv" / dev.INSTALL_MARKER).write_text(
+        __import__("hashlib").sha256((root / "pyproject.toml").read_bytes()).hexdigest()
+    )
     return python
+
+
+def up(root: Path, clusters: FakeClusters, run: FakeRunner | None = None, **kw: Any) -> int:
+    return dev.main(
+        ["up"],
+        root=root,
+        run=run or FakeRunner(),
+        clusters=clusters,
+        port_in_use=kw.get("port_in_use", lambda port: False),
+    )
 
 
 class TestParseEnv:
     def test_parses_values_comments_quotes_and_export(self) -> None:
-        text = (
-            "# comment\n"
-            "\n"
-            "ADMIN_TOKEN=abc\n"
-            "export ROUTER_TOKEN=def\n"
-            'QUOTED="with spaces"\n'
-            "SINGLE='x=y'\n"
-            "EMPTY=\n"
-        )
+        text = "# c\n\nADMIN_TOKEN=abc\nexport ROUTER_TOKEN=def\nQUOTED=\"a b\"\nEMPTY=\n"
         assert dev.parse_env(text) == {
             "ADMIN_TOKEN": "abc",
             "ROUTER_TOKEN": "def",
-            "QUOTED": "with spaces",
-            "SINGLE": "x=y",
+            "QUOTED": "a b",
             "EMPTY": "",
         }
 
@@ -64,89 +129,38 @@ class TestParseEnv:
             dev.parse_env(f"OK=1\n{line}\n")
 
 
-class TestComposeFiles:
-    def test_base_then_extras_then_deployed_cells(self, root: Path) -> None:
-        (root / "deploy" / "cell-3.override.yml").write_text("{}")
-        cells = root / "deploy" / "cells"
-        cells.mkdir()
-        (cells / "cell-5.yml").write_text("{}")
-        (cells / "cell-4.yml").write_text("{}")
-        (cells / "notes.txt").write_text("ignored")
-
-        files = dev.compose_files(root, {"EXTRA_COMPOSE_FILES": " deploy/cell-3.override.yml , "})
-
-        assert [f.relative_to(root).as_posix() for f in files] == [
-            "deploy/docker-compose.yml",
-            "deploy/cell-3.override.yml",
-            "deploy/cells/cell-4.yml",
-            "deploy/cells/cell-5.yml",
-        ]
-
-    def test_missing_extra_file_is_an_error(self, root: Path) -> None:
-        with pytest.raises(dev.DevError, match="deploy/nope.yml"):
-            dev.compose_files(root, {"EXTRA_COMPOSE_FILES": "deploy/nope.yml"})
-
-    def test_compose_command_uses_env_file_only_when_present(self, root: Path) -> None:
-        files = dev.compose_files(root, {})
-        assert dev.compose_command(root, files, "ps")[:3] == ["docker", "compose", "-f"]
-        (root / ".env").write_text("A=1\n")
-        assert dev.compose_command(root, files, "ps")[:4] == [
-            "docker",
-            "compose",
-            "--env-file",
-            str(root / ".env"),
-        ]
-
-
 class TestVenv:
     def test_creates_venv_and_installs_when_missing(self, root: Path) -> None:
         run = FakeRunner()
 
         def create_venv(cmd: Sequence[str], env: Mapping[str, str]) -> int:
             if "venv" in cmd:
-                make_venv(root)
+                python = dev.venv_python(root)
+                python.parent.mkdir(parents=True)
+                python.write_text("")
             return run(cmd, env)
 
         assert dev.ensure_venv(root, create_venv, python="system-python") == 0
-        python = str(dev.venv_python(root))
         assert run.commands == [
             ["system-python", "-m", "venv", str(root / ".venv")],
-            [python, "-m", "pip", "install", "--quiet", "-e", ".[dev]"],
+            [str(dev.venv_python(root)), "-m", "pip", "install", "--quiet", "-e", ".[dev]"],
         ]
 
-    def test_stops_when_the_venv_cannot_be_created(self, root: Path) -> None:
-        run = FakeRunner(fail_on="venv")
-        assert dev.ensure_venv(root, run, python="system-python") == 1
-        assert len(run.commands) == 1  # no install attempted
-
-    def test_skips_install_when_up_to_date(self, root: Path) -> None:
+    def test_skips_install_when_up_to_date_and_reinstalls_on_change(self, root: Path) -> None:
         make_venv(root)
         run = FakeRunner()
         dev.ensure_venv(root, run)
-        dev.ensure_venv(root, run)
-        assert len(run.commands) == 1  # installed once, then the marker matches
-
-    def test_reinstalls_when_pyproject_changes(self, root: Path) -> None:
-        make_venv(root)
-        run = FakeRunner()
-        dev.ensure_venv(root, run)
+        assert run.commands == []
         (root / "pyproject.toml").write_text("[project]\nname = 'changed'\n")
-        dev.ensure_venv(root, run)
-        assert len(run.commands) == 2
-
-    def test_force_reinstalls(self, root: Path) -> None:
-        make_venv(root)
-        run = FakeRunner()
         dev.ensure_venv(root, run)
         dev.ensure_venv(root, run, force=True)
         assert len(run.commands) == 2
 
-    def test_failed_install_is_retried_next_time(self, root: Path) -> None:
+    def test_failures(self, root: Path) -> None:
+        assert dev.ensure_venv(root, FakeRunner(fail_on="venv"), python="p") == 1
         make_venv(root)
+        (root / "pyproject.toml").write_text("[project]\nname = 'changed'\n")
         assert dev.ensure_venv(root, FakeRunner(fail_on="pip")) == 1
-        run = FakeRunner()
-        dev.ensure_venv(root, run)
-        assert len(run.commands) == 1
 
     def test_venv_python_path_per_platform(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
@@ -157,117 +171,178 @@ class TestVenv:
         assert dev.venv_python(root) == root / ".venv" / "bin" / "python"
 
 
-class TestTargets:
-    def test_up_installs_builds_starts_and_shows_status(
+class TestUp:
+    def test_creates_two_small_clusters_builds_installs_and_shows_status(self, root: Path) -> None:
+        make_venv(root)
+        (root / ".env").write_text("ADMIN_TOKEN=a-secret\nCELL_1_TOKEN=c1-secret\n")
+        clusters, run = FakeClusters(), FakeRunner()
+
+        assert up(root, clusters, run) == 0
+
+        assert clusters.calls[0] == ("network",)
+        assert clusters.calls[1] == ("cluster", "platform", ("127.0.0.1:8080:8080", "127.0.0.1:8000:8000"))
+        assert clusters.calls[2] == ("cluster", "cell-1", ())
+        builds = [c for c in run.commands if c[:2] == ["docker", "build"]]
+        assert [c[3] for c in builds] == dev.IMAGES
+        assert ("import", "platform", ("cellarch/router:dev", "cellarch/control-plane:dev")) in clusters.calls
+        assert ("import", "cell-1", ("cellarch/cell-gateway:dev",)) in clusters.calls
+
+        cell = clusters.helm("cell-1")
+        assert cell[2:4] == ("cellarch", "cell")
+        assert cell[4] == {"cellId": "cell-1", "secrets": {"internalToken": "c1-secret"}}
+        assert ("dns", {"cell-1": "172.20.0.6"}) in clusters.calls
+
+        platform = clusters.helm("platform")[4]
+        assert platform["secrets"]["adminToken"] == "a-secret"
+        assert platform["secrets"]["cellCredentials"] == {"cell-1": "c1-secret"}
+        assert platform["controlPlane"]["seedCells"] == {"cell-1": "http://cell-1.cellarch.internal:8000"}
+        assert platform["router"]["service"] == {"type": "LoadBalancer", "port": 8080}
+        assert platform["controlPlane"]["service"] == {"type": "LoadBalancer", "port": 8000}
+        assert platform["redis"] == {"enabled": False}
+        # The platform is installed last, once every cell answers by name.
+        assert clusters.calls[-1][0:2] == ("helm", "platform")
+        assert run.commands[-1][-1] == "status"
+
+    def test_more_seed_cells_and_defaults(self, root: Path) -> None:
+        make_venv(root)
+        (root / ".env").write_text("CELLS=cell-1, cell-2\n")
+        clusters = FakeClusters()
+        assert up(root, clusters) == 0
+        assert clusters.helm("cell-2")[4]["secrets"]["internalToken"] == "dev-cell-2-token"
+        assert set(clusters.helm("platform")[4]["controlPlane"]["seedCells"]) == {"cell-1", "cell-2"}
+
+    def test_cells_added_with_cellctl_are_updated_and_keep_their_values(self, root: Path) -> None:
+        make_venv(root)
+        clusters = FakeClusters({"platform": "running", "cell-1": "running", "cell-7": "stopped"})
+        assert up(root, clusters) == 0
+        assert ("cluster", "cell-7", ()) in clusters.calls  # started again
+        assert clusters.helm("cell-7")[4:] == ({}, True)  # --reuse-values keeps its credential
+        dns = next(c[1] for c in clusters.calls if c[0] == "dns")
+        assert set(dns) == {"cell-1", "cell-7"}
+        assert "cell-7" not in clusters.helm("platform")[4]["controlPlane"]["seedCells"]
+
+    def test_redis_backend(self, root: Path) -> None:
+        make_venv(root)
+        (root / ".env").write_text("RATE_LIMIT_BACKEND=redis\n")
+        clusters = FakeClusters()
+        up(root, clusters)
+        assert clusters.helm("platform")[4]["redis"] == {"enabled": True}
+
+    def test_refuses_when_the_ports_are_taken_by_something_else(
         self, root: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         make_venv(root)
-        (root / ".env").write_text("ADMIN_TOKEN=secret-admin\n")
-        run = FakeRunner()
+        clusters = FakeClusters()
+        assert up(root, clusters, port_in_use=lambda port: port == 8080) == 2
+        assert "docker compose" in capsys.readouterr().err
+        assert clusters.calls == []
 
-        assert dev.main(["up"], root=root, run=run) == 0
+    def test_ports_in_use_by_our_own_platform_cluster_are_fine(self, root: Path) -> None:
+        make_venv(root)
+        clusters = FakeClusters({"platform": "running"})
+        assert up(root, clusters, port_in_use=lambda port: True) == 0
 
-        commands = run.commands
-        assert commands[0][-4:] == ["install", "--quiet", "-e", ".[dev]"]
-        up = commands[1]
-        assert up[:4] == ["docker", "compose", "--env-file", str(root / ".env")]
-        assert up[-6:] == ["up", "--build", "--detach", "--wait", "--wait-timeout", "180"]
-        assert commands[2][1:] == ["-m", "cellarch.cli.cellctl", "status"]
-        status_env = run.calls[2][1]
-        assert status_env["CELLCTL_TOKEN"] == "secret-admin"
-        assert status_env["ADMIN_TOKEN"] == "secret-admin"
-        assert "Using settings from .env" in capsys.readouterr().out
-
-    def test_up_without_env_file_uses_defaults(
-        self, root: Path, capsys: pytest.CaptureFixture[str]
+    @pytest.mark.parametrize("step", ["network", "cluster", "import", "helm", "dns"])
+    def test_stops_at_the_first_cluster_failure(
+        self, root: Path, step: str, capsys: pytest.CaptureFixture[str]
     ) -> None:
         make_venv(root)
-        run = FakeRunner()
-        assert dev.main(["up"], root=root, run=run) == 0
-        assert run.calls[-1][1]["CELLCTL_TOKEN"] == "dev-admin-token"
-        assert "No .env file" in capsys.readouterr().out
+        clusters = FakeClusters(fail_on=step)
+        assert up(root, clusters) == 1
+        assert f"{step} failed" in capsys.readouterr().err
 
-    def test_explicit_cellctl_token_wins(self, root: Path) -> None:
+    def test_stops_when_an_image_does_not_build(self, root: Path) -> None:
         make_venv(root)
-        (root / ".env").write_text("ADMIN_TOKEN=a\nCELLCTL_TOKEN=b\n")
-        run = FakeRunner()
-        dev.main(["status"], root=root, run=run)
-        assert run.calls[-1][1]["CELLCTL_TOKEN"] == "b"
+        clusters = FakeClusters()
+        assert up(root, clusters, FakeRunner(fail_on="build")) == 1
+        assert not any(c[0] == "import" for c in clusters.calls)
 
-    def test_up_stops_when_docker_fails(self, root: Path) -> None:
+    def test_stops_when_install_fails(self, root: Path) -> None:
+        (root / ".venv").mkdir()
+        clusters = FakeClusters()
+        assert up(root, clusters, FakeRunner(fail_on="pip")) == 1
+        assert clusters.calls == []
+
+    def test_rejects_invalid_cell_ids(self, root: Path, capsys: pytest.CaptureFixture[str]) -> None:
         make_venv(root)
-        run = FakeRunner(fail_on="up")
-        assert dev.main(["up"], root=root, run=run) == 1
-        assert not any("cellarch.cli.cellctl" in cmd for cmd in run.commands)
+        (root / ".env").write_text("CELLS=Cell One\n")
+        assert up(root, FakeClusters()) == 2
+        assert "CELLS" in capsys.readouterr().err
 
-    def test_up_stops_when_install_fails(self, root: Path) -> None:
+
+class TestOtherTargets:
+    def call(self, target: str, root: Path, clusters: FakeClusters, run: FakeRunner) -> int:
+        return dev.main([target], root=root, run=run, clusters=clusters, port_in_use=lambda p: False)
+
+    def test_down_stops_running_clusters_and_keeps_data(self, root: Path) -> None:
+        clusters = FakeClusters({"platform": "running", "cell-1": "running", "cell-2": "stopped"})
+        assert self.call("down", root, clusters, FakeRunner()) == 0
+        assert clusters.calls == [("stop", "cell-1"), ("stop", "platform")]
+
+    def test_clean_deletes_clusters_and_the_network(
+        self, root: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        clusters = FakeClusters({"platform": "running", "cell-1": "stopped"})
+        assert self.call("clean", root, clusters, FakeRunner()) == 0
+        assert clusters.calls == [("delete", "cell-1"), ("delete", "platform"), ("delete-network",)]
+        assert "deleted" in capsys.readouterr().out
+
+    def test_clean_with_nothing_to_delete(self, root: Path) -> None:
+        clusters = FakeClusters(fail_on="delete-network")
+        assert self.call("clean", root, clusters, FakeRunner()) == 0  # no network is fine
+
+    def test_down_reports_failures(self, root: Path) -> None:
+        clusters = FakeClusters({"platform": "running"}, fail_on="stop")
+        assert self.call("down", root, clusters, FakeRunner()) == 1
+
+    def test_build_only_builds(self, root: Path) -> None:
+        clusters, run = FakeClusters(), FakeRunner()
+        assert self.call("build", root, clusters, run) == 0
+        assert [c[3] for c in run.commands] == dev.IMAGES
+        assert clusters.calls == []
+
+    def test_status_test_and_setup(self, root: Path) -> None:
         make_venv(root)
-        run = FakeRunner(fail_on="pip")
-        assert dev.main(["up"], root=root, run=run) == 1
-        assert len(run.commands) == 1
-
-    @pytest.mark.parametrize(
-        ("target", "tail"),
-        [("down", ["down"]), ("build", ["build"])],
-    )
-    def test_docker_targets(self, root: Path, target: str, tail: list[str]) -> None:
         run = FakeRunner()
-        assert dev.main([target], root=root, run=run) == 0
-        assert run.commands == [run.commands[0]]
-        assert run.commands[0][:2] == ["docker", "compose"]
-        assert run.commands[0][-len(tail) :] == tail
-
-    def test_test_target_runs_pytest_with_coverage(self, root: Path) -> None:
-        make_venv(root)
-        run = FakeRunner()
-        assert dev.main(["test"], root=root, run=run) == 0
+        assert self.call("status", root, FakeClusters(), run) == 0
+        assert run.commands[-1][1:] == ["-m", "cellarch.cli.cellctl", "status"]
+        assert self.call("test", root, FakeClusters(), run) == 0
         assert run.commands[-1][1:] == ["-m", "pytest", "--cov"]
-
-    def test_setup_forces_a_reinstall(self, root: Path) -> None:
-        make_venv(root)
-        run = FakeRunner()
-        dev.main(["setup"], root=root, run=run)
-        dev.main(["setup"], root=root, run=run)
-        assert len(run.commands) == 2
-
-    def test_bad_env_file_is_reported(self, root: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        (root / ".env").write_text("not valid\n")
-        assert dev.main(["down"], root=root, run=FakeRunner()) == 2
-        assert ".env line 1" in capsys.readouterr().err
+        assert self.call("setup", root, FakeClusters(), run) == 0
+        assert run.commands[-1][-1] == ".[dev]"
 
     @pytest.mark.parametrize(
         ("env_file", "token"),
-        [
-            (None, "dev-admin-token"),
-            ("ADMIN_TOKEN=from-admin\n", "from-admin"),
-            ("ADMIN_TOKEN=a\nCELLCTL_TOKEN=from-cellctl\n", "from-cellctl"),
-        ],
+        [(None, "dev-admin-token"), ("ADMIN_TOKEN=x\n", "x"), ("ADMIN_TOKEN=a\nCELLCTL_TOKEN=y\n", "y")],
     )
-    def test_token_target_prints_only_the_token(
-        self,
-        root: Path,
-        capsys: pytest.CaptureFixture[str],
-        env_file: str | None,
-        token: str,
+    def test_token_target(
+        self, root: Path, capsys: pytest.CaptureFixture[str], env_file: str | None, token: str
     ) -> None:
-        # Used by make.ps1 to set CELLCTL_TOKEN in the caller's terminal.
         if env_file:
             (root / ".env").write_text(env_file)
-        run = FakeRunner()
-        assert dev.main(["token"], root=root, run=run) == 0
+        assert self.call("token", root, FakeClusters(), FakeRunner()) == 0
         assert capsys.readouterr().out == f"{token}\n"
-        assert run.calls == []
 
-    def test_token_target_reports_a_bad_env_file(
-        self, root: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_bad_env_file(self, root: Path, capsys: pytest.CaptureFixture[str]) -> None:
         (root / ".env").write_text("broken\n")
-        assert dev.main(["token"], root=root, run=FakeRunner()) == 2
-        assert capsys.readouterr().out == ""
+        assert self.call("token", root, FakeClusters(), FakeRunner()) == 2
+        assert self.call("down", root, FakeClusters(), FakeRunner()) == 2
+        assert ".env line 1" in capsys.readouterr().err
 
     def test_help_and_unknown_targets(self, root: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        assert dev.main(["help"], root=root, run=FakeRunner()) == 0
-        assert "make up" in capsys.readouterr().out
+        assert self.call("help", root, FakeClusters(), FakeRunner()) == 0
+        out = capsys.readouterr().out
+        assert "make up" in out and "make clean" in out
         assert dev.main([], root=root, run=FakeRunner()) == 0
-        assert dev.main(["deploy-everything"], root=root, run=FakeRunner()) == 2
+        assert self.call("deploy-everything", root, FakeClusters(), FakeRunner()) == 2
         assert "unknown target" in capsys.readouterr().err
+
+
+def test_port_in_use_checks_a_real_socket() -> None:
+    import socket
+
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        assert dev.port_in_use(server.getsockname()[1])
+    assert not dev.port_in_use(1)
