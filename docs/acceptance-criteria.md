@@ -57,4 +57,18 @@ What each delivery stage must do, in plain language. The precise, executable ver
 | A29 | an isolated tenant with data | it is removed from its cell | its database is deleted entirely |
 | A30 | tenant onboarding | no isolation is given, `pooled` is given, or an unknown value is given | the default is `isolated`, `pooled` is honoured, an unknown value is rejected (`422`); status counts isolated tenants per cell and in total |
 
+## Stage 2: traffic protection
+
+### Rate limits
+
+| ID | Given | When | Then |
+|---|---|---|---|
+| A31 | a tenant that has used up its limit | it sends another request | the router answers `429 rate_limited` with `Retry-After`, and the request never reaches the cell |
+| A32 | two tenants on the same cell, one throttled | the other sends requests | the other tenant is unaffected |
+| A33 | a tenant with a burst of 2 at 1 request/s | it sends 3 requests at once, then waits a second | 2 succeed, the 3rd is throttled, and after the wait it can send again |
+| A34 | tenants on each tier | limits are read, overridden and cleared | the tier default applies (standard 50/s burst 100, premium 500/s burst 1000); an override replaces it; clearing restores it; the router applies changes after its route cache refreshes |
+| A35 | a tenant the router has seen | the control plane goes down | its limit is still enforced from the cached route |
+| A36 | a router configured as one of 2 router replicas | a tenant with a burst of 4 sends requests | that router allows half (2), so all routers together stay within the limit |
+| A37 | any request the router forwards | the response comes back | it carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset` |
+
 Stage 1 also has a demo acceptance check: `scripts/demo.py` runs end-to-end against the in-process platform (`tests/acceptance/test_demo.py`) and against the real compose stack in CI (`compose-smoke`).
