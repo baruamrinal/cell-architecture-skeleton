@@ -1,0 +1,27 @@
+# One cell, in its own cluster. Install once per cell cluster.
+
+cellId: ""                      # required, e.g. cell-1
+
+image:
+  repository: cellarch          # images are <repository>/<component>:<tag>
+  tag: dev
+  pullPolicy: IfNotPresent
+
+# Required: the credential the control plane uses for this cell's /internal API.
+# Locally `make up` / `cellctl cells deploy` set it; in production External Secrets.
+secrets:
+  create: true
+  existingSecret: ""
+  internalToken: ""
+
+gateway:
+  maxConcurrentRequests: 100
+  service:
+    type: LoadBalancer          # the cell's entry point: internal NLB in production,
+    port: 8000                  # the cell cluster's load balancer on the private network locally
+  persistence:
+    size: 1Gi
+    storageClass: ""
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}

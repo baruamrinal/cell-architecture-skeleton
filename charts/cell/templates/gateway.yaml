@@ -1,0 +1,91 @@
+{{- $name := printf "%s-gateway" (include "cell.fullname" .) -}}
+{{- $cell := include "cell.id" . -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cell.labels" (dict "root" . "component" "gateway") | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.gateway.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.gateway.persistence.size }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cell.labels" (dict "root" . "component" "gateway") | nindent 4 }}
+spec:
+  replicas: 1                      # single writer of the cell registry (Postgres later)
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "cell.selector" (dict "root" . "component" "gateway") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cell.labels" (dict "root" . "component" "gateway") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 10001
+      containers:
+        - name: gateway
+          image: {{ .Values.image.repository }}/cell-gateway:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "cell.containerSecurity" . | nindent 10 }}
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: CELL_ID
+              value: {{ $cell | quote }}
+            - name: CELL_DB_PATH
+              value: "/data/{{ $cell }}.db"
+            - name: CELL_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cell.secretName" . }}
+                  key: internal-token
+            - name: MAX_CONCURRENT_REQUESTS
+              value: {{ .Values.gateway.maxConcurrentRequests | quote }}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ $name }}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cell.labels" (dict "root" . "component" "gateway") | nindent 4 }}
+spec:
+  type: {{ .Values.gateway.service.type }}
+  selector:
+    {{- include "cell.selector" (dict "root" . "component" "gateway") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.gateway.service.port }}
+      targetPort: http
+      protocol: TCP

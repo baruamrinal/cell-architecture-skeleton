@@ -1,0 +1,29 @@
+{{- $fullname := include "cell.fullname" . -}}
+# Deny all ingress in the cell's namespace, then allow only the gateway's port.
+# Tenant stacks (stage 2.5) add: gateway -> tenant services, services -> own database.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-default-deny
+  labels:
+    {{- include "cell.labels" (dict "root" . "component" "cell") | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+# The gateway is the cell's only entry point (router and control plane, from the
+# platform cluster, over the private network).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-gateway
+  labels:
+    {{- include "cell.labels" (dict "root" . "component" "gateway") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "cell.selector" (dict "root" . "component" "gateway") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - {port: 8000, protocol: TCP}

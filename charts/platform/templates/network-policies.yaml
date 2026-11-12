@@ -1,0 +1,66 @@
+{{- $fullname := include "platform.fullname" . -}}
+# Deny all ingress in the namespace, then allow only what each component needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-default-deny
+  labels:
+    {{- include "platform.labels" (dict "root" . "component" "platform") | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+# The router is the public entry point.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-router
+  labels:
+    {{- include "platform.labels" (dict "root" . "component" "router") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "platform.selector" (dict "root" . "component" "router") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - {port: 8000, protocol: TCP}
+---
+# Control plane: the router (route lookups) and operators (admin API; API Gateway + IAM
+# in production). Every call still needs a credential.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-control-plane
+  labels:
+    {{- include "platform.labels" (dict "root" . "component" "control-plane") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "platform.selector" (dict "root" . "component" "control-plane") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - {port: 8000, protocol: TCP}
+{{- if .Values.redis.enabled }}
+---
+# Redis: routers only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-redis
+  labels:
+    {{- include "platform.labels" (dict "root" . "component" "redis") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "platform.selector" (dict "root" . "component" "redis") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: router
+      ports:
+        - {port: 6379, protocol: TCP}
+{{- end }}
