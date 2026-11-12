@@ -299,7 +299,7 @@ infra/
 
 | Workflow | Trigger | Does |
 |---|---|---|
-| `ci.yml` | Pull request | Lint (ruff), type check (mypy), pytest, ARM Docker build, compose smoke test with demo, Terraform fmt/validate/tflint, Checkov, Trivy, pip-audit, gitleaks, Terraform plan comment per changed stack |
+| `ci.yml` | Pull request | Lint (ruff), type check (mypy), pytest with branch coverage gate (≥ 90%), `terraform test`, ARM Docker build, compose smoke test with demo, Terraform fmt/validate/tflint, Checkov, Trivy, pip-audit, gitleaks, Terraform plan comment per changed stack |
 | `cd.yml` | Merge to main | Build once → push to ECR (SHA tag, signed) → apply platform → release cells in waves from `cells.yaml` (apply cell stack → ECS deploy → database changes → wait → CloudWatch alarm check → next wave; roll back the failed wave). Prod requires approval. Customer cells are in late waves within their maintenance windows. |
 | `cell-lifecycle.yml` | Dispatched by the control plane (GitHub App token) or manually | Create or destroy a cell: edit `cells.yaml` (automated commit) → apply → deploy → health check → report to the control plane |
 | `drift.yml` | Nightly | Plan every stack and alert on drift; report expired seasonal cells and untagged resources |
@@ -379,12 +379,41 @@ Account-agnostic modules and the cell `hosting` field are introduced in stages 1
 
 ---
 
-## 14. Test strategy
+## 14. Development approach: test-driven development (TDD)
 
-- **Unit:** placement strategies, token bucket, N-router share calculation, Redis limiter (against a local Redis in CI) including fail-open fallback (injected clock), schedule state machine.
-- **In-process integration:** the full platform wired with httpx ASGI transports, no Docker. Covers onboarding, routing, isolation, `/internal` blocking, rate limits, stale-route fallback, cell outage blast radius, moves and rollback, the seasonal lifecycle, and customer-cell credential isolation.
-- **Smoke:** `docker compose up` + `scripts/demo.py` in CI.
-- **Infrastructure:** `terraform validate`, tflint, Checkov, a plan per stack. Optional Terratest in the dev account.
+All code, application and infrastructure, is written test-first.
+
+### 14.1 The cycle
+1. **Red:** write one small failing test for the next behavior. Run it and see it fail for the expected reason.
+2. **Green:** write the minimum code to make it pass.
+3. **Refactor:** clean up with all tests green.
+4. Repeat. Each behavior in this plan becomes one or more tests before it becomes code.
+
+### 14.2 Outside-in per stage
+- Each stage **starts with acceptance tests** taken from this plan's behaviors (e.g. "a tenant on a frozen cell can read but not write"). They are written first and fail until the stage is done.
+- Inside that, unit-level TDD drives each module (placement, token bucket, cache, move steps, scheduler states).
+- A stage is done when its acceptance tests pass.
+
+### 14.3 Test layers
+
+| Layer | What | Tooling | Speed |
+|---|---|---|---|
+| Unit | Pure logic: placement strategies, token bucket, N-router share, routing cache, schedule state machine, move-step rollback | pytest, injected clock, in-memory fakes | Milliseconds |
+| Contract | Wire contracts between router ↔ control plane and control plane ↔ cell (routing entry, `/internal` API); both sides tested against the same schemas | pytest + shared pydantic models | Fast |
+| In-process integration | The full platform wired with httpx ASGI transports, no Docker: onboarding, routing, isolation, `/internal` blocking, rate limits, stale-route fallback, cell outage blast radius, moves and rollback, the seasonal lifecycle, customer-cell credential isolation | pytest | Seconds |
+| Adapter | Redis limiter including fail-open; Postgres storage including row-level security | pytest against Redis/Postgres service containers in CI | Seconds |
+| Smoke | `docker compose up` + `scripts/demo.py` | CI | Minutes |
+| Infrastructure | Module behavior via native `terraform test` (mocked providers, no AWS cost); security guardrails as policy tests (Checkov custom checks) | terraform test, Checkov, tflint | Fast |
+| Infrastructure (optional) | Real apply in the dev account | Terratest | Minutes |
+
+### 14.4 Rules
+- **No production code without a failing test first.** Bug fixes start with a test that reproduces the bug.
+- **Tests never sleep.** Time comes from an injectable clock.
+- **Fakes over mocks:** in-memory provisioner, routing store and HTTP transports. Mock only at external boundaries (AWS, GitHub).
+- **Tenant-isolation tests are mandatory** for any change touching data access.
+- **Commit history shows the cycle:** a failing test, then the implementation (as separate commits or a single commit containing both, never code without tests).
+- **CI gates:** all tests pass; branch coverage ≥ 90% on `src/` (pytest-cov). Coverage is a safety net, not the goal.
+- Mutation testing (mutmut) runs nightly on core modules (placement, limiter, move procedure) to check that tests actually catch faults.
 
 ---
 
@@ -410,6 +439,7 @@ Account-agnostic modules and the cell `hosting` field are introduced in stages 1
 | Default placement | Fill-first (target utilization 75%) |
 | Partition key | `tenant_id` only; a tenant lives in exactly one cell |
 | Sharding a tenant across cells | Excluded (not in v1 or roadmap) |
+| Development approach | Test-driven development (red → green → refactor), outside-in per stage |
 | Rate-limit algorithm | Token bucket (no leaky bucket) |
 | Rate limiting across routers | In-memory with automatic N-router share + WAF rate rule; Redis-backed limiter built, off by default, fails open |
 | Customer-hosted cells | Built in v1 (model 3); fully self-hosted later |
