@@ -250,4 +250,11 @@ class LocalClusters:
                 "rollout", "restart", "deployment", "coredns",
             ]
         )  # fmt: skip
+        # The new names resolve only once the restarted CoreDNS pods are ready.
+        self._exec(
+            [
+                "kubectl", "--context", platform, "-n", "kube-system",
+                "rollout", "status", "deployment", "coredns", "--timeout", "120s",
+            ]
+        )  # fmt: skip
         return True

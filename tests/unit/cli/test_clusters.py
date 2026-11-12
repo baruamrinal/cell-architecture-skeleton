@@ -138,7 +138,11 @@ def test_cell_dns_zone_is_applied_to_the_platform_cluster() -> None:
     assert manifest is not None
     assert "cellarch.internal:53" in manifest
     assert manifest.index("cell-1.cellarch.internal") < manifest.index("cell-2.cellarch.internal")
-    assert any("rollout restart deployment coredns" in c for c in runner.commands())
+    commands = runner.commands()
+    restart = next(i for i, c in enumerate(commands) if "rollout restart deployment coredns" in c)
+    # The new DNS entries only work once the restarted CoreDNS pods are ready.
+    assert "rollout status deployment coredns" in commands[restart + 1]
+    assert "--timeout" in commands[restart + 1]
 
 
 def test_cell_dns_is_left_alone_when_unchanged() -> None:
