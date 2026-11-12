@@ -415,7 +415,7 @@ Stack: Python 3.12, FastAPI, httpx, pydantic, pytest. SQLite locally, Aurora Pos
 | 1 | Core platform | Cells, router (tenant routing, cache, stale-route fallback, retry), control plane (registry, fill-first placement, separate admin/router/per-cell credentials), tenant-isolation data layer, `cellctl` (cells and tenants), Dockerfile, compose, demo. CI jobs for Docker build and compose smoke test follow in a separate `ci:` PR (protected path). |
 | 2 | Traffic protection | `RateLimiter` interface, in-memory token bucket with automatic N-router share, Redis-backed limiter (off by default, fails open), tier and override limits, metering, cell request cap. WAF rate rule follows in stage 5. |
 | 3 | Tenant moves | Move procedure, promote/demote, drain, consolidate, audit log |
-| 4 | Seasonal scaling | Schedules, scheduler, standby-pool provisioner, season limits |
+| 4 | Seasonal scaling | Schedules, scheduler, standby-pool provisioner, season limits. (Local cell deploy/decommission via `cellctl` was pulled forward into stage 1; stage 4 builds the scheduler-driven provisioner on top.) |
 | 5 | Infrastructure | Terraform bootstrap, modules, platform and cell stacks, dev environment, security guardrails, control plane admin access (API Gateway + IAM, SSM runbook), `cellctl` IAM signing, Terraform checks in CI |
 | 6 | Delivery automation | `cd.yml` with release waves, `cell-lifecycle.yml`, GitHub-workflow provisioner, `drift.yml` |
 | 7 | Customer-hosted cells | `hosting` field and per-cell credentials (app), customer-bootstrap (CloudFormation + Terraform), PrivateLink module, cross-account image sharing, cross-account move via S3, metadata-only telemetry, maintenance windows, break-glass runbook |
@@ -491,5 +491,8 @@ All code, application and infrastructure, is written test-first.
 | Rate limiting across routers | In-memory with automatic N-router share + WAF rate rule; Redis-backed limiter built, off by default, fails open |
 | PR approver | `github-actions[bot]` policy gate (§9.1); no AI review, no secrets |
 | Control plane access | Never public; separate admin, router (read-only) and per-cell credentials; AWS: API Gateway HTTP API with IAM auth + VPC link, SSM for break-glass; `cellctl` CLI |
+| Cell credentials | Write-only; registered through the API and stored in the control plane database locally, SSM Parameter Store (KMS) on AWS; `CELL_CREDENTIALS` remains as a configuration fallback |
+| Cell registration | Control plane verifies the cell first: healthy, reports the expected cell ID, accepts the credential |
+| Local cell deploy | `cellctl cells deploy/decommission` drives Docker on the operator's machine; the control plane never gets the Docker socket (it would mean root on the host). On AWS the same commands trigger `cell-lifecycle.yml` (stage 6) |
 | Merge strategy | Squash merge only; PR title (conventional commits) becomes the commit message |
 | Customer-hosted cells | Built in v1 (model 3); fully self-hosted later |
