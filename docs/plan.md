@@ -19,7 +19,7 @@ Status: **plan approved for v1, not yet implemented.**
 
 This is a skeleton, but it must meet an enterprise design: it differs from production only in *how much* is implemented, never in *how it is structured*. Every change must satisfy:
 
-1. **A production equivalent exists and is documented** in [production-architecture.md](production-architecture.md). Local stand-ins (SQLite, Docker, tokens in `.env`) sit behind the same interface as their production counterparts (Aurora, ECS, Secrets Manager).
+1. **A production equivalent exists and is documented** in [production-architecture.md](production-architecture.md). Local stand-ins (SQLite, Docker, tokens in `.env`) sit behind the same interface as their production counterparts (Aurora, EKS, Secrets Manager).
 2. **No shortcuts in the boundaries:**
    - control plane vs data plane, cells sharing nothing, per-tenant data and runtime;
    - internal APIs never exposed;
@@ -113,10 +113,10 @@ End users and tenants never reach the control plane.
 **On AWS (stage 5):**
 ```
 operators / CI ──SigV4 (IAM)──► API Gateway HTTP API ──VPC link──► control plane (private subnets)
-router (in VPC) ──Service Connect─────────────────────────────────► control plane
+router (platform cluster) ──in-cluster service──────────────────────► control plane
 ```
 - Admin access goes through an **API Gateway HTTP API with IAM authorization** and a VPC link. It is pay per request with no fixed cost, reachable from GitHub-hosted runners without a VPN, scoped per route by IAM policy, and logged by CloudTrail and API Gateway access logs.
-- The router reaches it inside the VPC through Service Connect with a read-only service identity.
+- The router reaches it inside the platform cluster with a read-only service identity.
 - Break-glass and debugging: **SSM Session Manager port-forward** to the control plane task. It needs no bastion host or VPN, and is IAM-controlled and logged.
 - Customers of customer-hosted cells have no access to the control plane.
 
@@ -195,7 +195,7 @@ Three layers, all in v1:
 
 | Layer | Default | Accuracy | Cost | Notes |
 |---|---|---|---|---|
-| **In-memory token bucket** | On | Approximate with N routers | None | Each router enforces limit ÷ N. N is read periodically from ECS (running task count), or set in config locally, so autoscaling doesn't distort limits. |
+| **In-memory token bucket** | On | Approximate with N routers | None | Each router enforces limit ÷ N. N is read periodically from Kubernetes (ready router replicas), or set in config locally, so autoscaling doesn't distort limits. |
 | **AWS WAF rate rule** keyed on `X-Tenant-ID` | On (AWS) | Coarse (minute-level windows), shared across all routers | Low | Shared edge backstop against floods; no new infrastructure. |
 | **Redis-backed token bucket** (ElastiCache) | **Off**, per-environment flag | Exact, shared across routers | Redis cost only when enabled | For contractual or billing-grade limits. **Fails open:** if Redis is unreachable, the router falls back to the in-memory limiter, so Redis can never take traffic down. Atomic check-and-update via a Lua script. |
 
@@ -249,7 +249,7 @@ scheduled → cell_provisioning → moving_in → seasonal_active
 - **Cell provisioner interface:**
   - `StandbyPoolProvisioner` (local): claims a pre-defined idle cell.
   - `GitHubWorkflowProvisioner` (AWS): triggers `cell-lifecycle.yml`.
-- **Pre-scaling:** scheduled ECS scaling warms the seasonal cell before the window opens.
+- **Pre-scaling:** scheduled scaling (Karpenter node pools and the tenant's replicas) warms the seasonal cell before the window opens.
 
 **Safety rules**
 - Capacity check when the schedule is created and again when it runs. Overlapping schedules for one tenant are rejected.
@@ -339,13 +339,16 @@ management
 
 | Component | AWS service | Cost notes |
 |---|---|---|
-| Router | ECS Fargate (Graviton) behind **one** public ALB, autoscaled | The only public entry point |
-| Router → cell (vendor-hosted) | ECS Service Connect (Cloud Map) | No load balancer per cell |
+| Kubernetes clusters | **One EKS cluster per cell** + **one platform cluster** (router, control plane, Argo CD); Graviton nodes managed by Karpenter | One EKS fee per cluster: the price of real cell isolation; fill-first keeps cells few |
+| Router | Deployment in the **platform cluster** across 3 AZs, behind **one** public ALB (AWS Load Balancer Controller), autoscaled | The only public entry point |
+| Router → cell (vendor-hosted) | Each cell's gateway behind an **internal NLB** in its own cluster (or VPC Lattice) | Small per-cell cost; no cluster shared between cells |
 | Router → cell (customer-hosted) | PrivateLink interface endpoint | Per-endpoint cost, built into customer pricing |
-| Cell app | ECS Fargate (Graviton) per cell | Standby and seasonal cells at 0 tasks |
+| Cell gateway | Deployment in the cell's own cluster (Helm `cell` chart) | Standby and seasonal cells' node groups scale to zero |
 | Cell database | **One Aurora Serverless v2 PostgreSQL cluster per cell** (never shared across cells), one database per tenant, one schema and login per service | Auto-pause and scale to zero keep idle cells close to $0 |
-| Tenant services | Two ECS services per tenant (user-account, order-processing) in the cell, sized by tier | The price of per-tenant fault isolation |
-| Control plane | 1 small Fargate task + its own small Aurora database | Off the request path |
+| Tenant services | One Helm release of the `tenant-stack` chart per tenant in its cell's cluster: two Deployments (user-account, order-processing) sized by tier, own service account (IRSA), network policy | The price of per-tenant fault isolation |
+| Control plane | Deployment in the platform cluster + its own small Aurora database | Off the request path |
+| Delivery | **Helm charts** per service; **Argo CD** (GitOps) in the platform cluster deploys to every cell cluster in waves | No per-cell deployment tooling |
+| Secrets in clusters | **External Secrets Operator** syncs from Secrets Manager | Nothing in git |
 | Control plane admin access | API Gateway HTTP API (IAM auth) + VPC link; SSM Session Manager for break-glass | Pay per request; no bastion or VPN |
 | Shared rate limiter (optional) | ElastiCache (Redis/Valkey), smallest node; created only when the flag is on | No cost when disabled |
 | Secrets | SSM Parameter Store SecureString | Free standard tier |
@@ -374,8 +377,38 @@ infra/
 - Every resource is tagged with `cell_id`, `cell_type`, `hosting`, `tenant` (dedicated) and `env`.
 
 ### 8.4 Local environment
-- docker compose: control-plane, router (8080), cell-1, cell-2 (shared), cell-3 (standby pool), and cell-cust (a simulated customer-hosted cell on an isolated network with its own credentials). An optional `redis` compose profile runs Redis for testing the shared rate limiter.
-- SQLite per cell. Postgres is swapped in on AWS through the same storage interface.
+
+Locally, the topology mirrors production: **one small k3d (Kubernetes) cluster per cell plus one platform cluster**, on a shared Docker network.
+
+```
+k3d cluster "platform"   router (localhost:8080), control plane (localhost:8000), optional Redis
+k3d cluster "cell-1"     cell gateway + the cell's own Postgres + each tenant's stack
+k3d cluster "cell-2"     …
+```
+
+- The **same Helm charts** install locally and in production; only the values differ (image registry, sizes, secrets source).
+- **`make up`:**
+  - creates any missing clusters;
+  - builds the images and loads them into the clusters;
+  - installs the platform and seed cells with Helm.
+- `cellctl cells deploy` creates a new cell **cluster**; `cellctl tenants create` installs a tenant's `tenant-stack` release in its cell's cluster.
+- **Memory:** about 0.5–1 GB per cluster plus workloads. Two cells plus the platform fit in about 8 GB; 10–12 GB is recommended for Docker Desktop.
+- Docker Compose is retired once the k3d runtime lands. In-process tests stay Docker-free.
+
+### 8.5 Kubernetes runtime (cell = cluster)
+
+Cells must share nothing that can fail together, including Kubernetes itself. So:
+
+- **Each cell is its own Kubernetes cluster:** EKS in production, k3d locally. It has its own control plane, node groups, network plugin, DNS, ingress and add-ons. A bad cluster upgrade or add-on failure affects one cell.
+- **The router and control plane run in a separate platform cluster,** never inside a cell cluster, so a cell cluster failure can't take the router down.
+- **Cluster upgrades roll out cell by cell** in waves, like releases: canary cell cluster first.
+- **Inside a cell cluster:**
+  - the gateway and each tenant's stack are Helm releases;
+  - **network policies** allow only gateway → tenant services, tenant services → their own database, and order-processing → its own user-account;
+  - resource quotas and limits per tenant, by tier.
+- **Packaging:** a Helm chart per service image (`router`, `control-plane`, `cell-gateway`, `user-account`, `order-processing`), plus umbrella charts `platform`, `cell` and `tenant-stack`. Charts are tested with `helm lint`, schema validation and helm-unittest.
+- **Delivery:** **Argo CD** in the platform cluster deploys to every cell cluster from git, using ApplicationSets for cell-by-cell waves. Tenant onboarding commits the tenant's values file, Argo CD installs the release, and the control plane activates the tenant. A Kubernetes operator for tenants is the later enterprise step.
+- **Portability:** the same charts run on any conformant Kubernetes. That includes a customer's own cluster for customer-hosted cells (stage 7) or another cloud.
 
 ---
 
@@ -384,7 +417,7 @@ infra/
 | Workflow | Trigger | Does |
 |---|---|---|
 | `ci.yml` | Pull request | Lint (ruff), type check (mypy), pytest with branch coverage gate (≥ 90%), `terraform test`, ARM Docker build, compose smoke test with demo, Terraform fmt/validate/tflint, Checkov, Trivy, pip-audit, gitleaks, Terraform plan comment per changed stack |
-| `cd.yml` | Merge to main | Build once → push to ECR (SHA tag, signed) → apply platform → release cells in waves from `cells.yaml` (apply cell stack → ECS deploy → database changes → wait → CloudWatch alarm check → next wave; roll back the failed wave). Prod requires approval. Customer cells are in late waves within their maintenance windows. |
+| `cd.yml` | Merge to main | Build once → push to ECR (SHA tag, signed) → apply platform → release cells in waves from `cells.yaml` (apply cell stack → Argo CD sync of the cell cluster → database changes → wait → CloudWatch alarm check → next wave; roll back the failed wave). Prod requires approval. Customer cells are in late waves within their maintenance windows. |
 | `cell-lifecycle.yml` | Dispatched by the control plane (GitHub App token) or manually | Create or destroy a cell: edit `cells.yaml` (automated commit) → apply → deploy → health check → report to the control plane |
 | `drift.yml` | Nightly | Plan every stack and alert on drift; report expired seasonal cells and untagged resources |
 
@@ -430,7 +463,7 @@ PRs to `main` need one approval, given by `github-actions[bot]` through `pr-gate
 
 - Fill-first placement keeps the number of cells low. Consolidation retires under-used cells.
 - Dedicated cells only for a paying tier, a scheduled season, or a customer-hosted deployment. They are demoted back to shared afterwards.
-- Scale to zero: standby and seasonal cells (ECS at 0 tasks, Aurora auto-pause) and dev at night.
+- Scale to zero: standby and seasonal cells (node groups at 0, Aurora auto-pause) and dev at night.
 - Shared, not per cell: CI/CD, ECR, observability, control plane. Per cell: only the request path.
 - No ALB, NAT or Redis per cell. Short log retention.
 - Per-tenant metering plus tags give cost per tenant and per cell, which informs pricing.
@@ -471,10 +504,11 @@ Stack: Python 3.12, FastAPI, httpx, pydantic, pytest. SQLite locally, Aurora Pos
 | 1 | Core platform | Cells, router (tenant routing, cache, stale-route fallback, retry), control plane (registry, fill-first placement, separate admin/router/per-cell credentials), tenant-isolation data layer, `cellctl` (cells and tenants), Dockerfile, compose, demo. CI jobs for Docker build and compose smoke test follow in a separate `ci:` PR (protected path). |
 | 2 | Traffic protection | `RateLimiter` interface, in-memory token bucket with automatic N-router share, Redis-backed limiter (off by default, fails open), tier and override limits, metering, cell request cap. WAF rate rule follows in stage 5. |
 | 2.5 | Tenant services | Cell gateway; per-tenant `user-account` and `order-processing` containers; one Postgres server per cell with a database per tenant and a schema and login per service; onboarding handshake and tenant delete; replaces the sample `items` API and the isolation tier (§3.4) |
+| 2.6 | Kubernetes runtime | One image per service; Helm charts (`platform`, `cell`, `tenant-stack` and per service) tested with lint, schema validation and helm-unittest; local k3d clusters (platform + one per cell); `make up` and `cellctl` driving Helm; CI smoke test on k3d; Docker Compose retired (§8.5) |
 | 3 | Tenant moves | Move procedure (start the tenant's stack on the target cell, copy its database, switch), promote/demote, drain, consolidate, audit log |
 | 4 | Seasonal scaling | Schedules, scheduler, standby-pool provisioner, season limits. (Local cell deploy/decommission via `cellctl` was pulled forward into stage 1; stage 4 builds the scheduler-driven provisioner on top.) |
-| 5 | Infrastructure | Terraform bootstrap, modules, platform and cell stacks, dev environment, security guardrails, control plane admin access (API Gateway + IAM, SSM runbook), `cellctl` IAM signing, Terraform checks in CI |
-| 6 | Delivery automation | `cd.yml` with release waves, `cell-lifecycle.yml`, GitHub-workflow provisioner, `drift.yml` |
+| 5 | Infrastructure | Terraform bootstrap, modules, platform and cell stacks (an **EKS cluster and Aurora cluster per cell**, a platform EKS cluster), dev environment, security guardrails, control plane admin access (API Gateway + IAM, SSM runbook), `cellctl` IAM signing, Terraform checks in CI |
+| 6 | Delivery automation | **Argo CD** (ApplicationSets, cell-by-cell waves), External Secrets, `cd.yml` building and signing images, `cell-lifecycle.yml`, GitHub-workflow provisioner, `drift.yml` |
 | 7 | Customer-hosted cells | `hosting` field and per-cell credentials (app), customer-bootstrap (CloudFormation + Terraform), PrivateLink module, cross-account image sharing, cross-account move via S3, metadata-only telemetry, maintenance windows, break-glass runbook |
 | 8 | Documentation | Architecture, cost model, security, deployment models, runbooks |
 
@@ -539,7 +573,11 @@ All code, application and infrastructure, is written test-first.
 | IaC | Terraform / OpenTofu |
 | CI/CD | GitHub Actions |
 | Local storage / cloud storage | SQLite / Aurora Serverless v2 PostgreSQL |
-| Compute | ECS Fargate (Graviton) |
+| Compute | **Kubernetes:** EKS (Graviton, Karpenter) in production, k3d locally. Replaces the earlier ECS Fargate choice, so cells can run outside AWS (customer clusters, other clouds) |
+| Cell boundary in Kubernetes | **One cluster per cell** (production and local); router and control plane in a separate platform cluster. Namespace-per-cell was rejected: a shared cluster is a shared failure domain |
+| Deployment | **Helm** charts per service + umbrella charts; **Argo CD** GitOps with cell-by-cell waves; External Secrets for Secrets Manager |
+| Images | One image per service (`router`, `control-plane`, `cell-gateway`, `user-account`, `order-processing`) from one multi-stage Dockerfile |
+| Local runtime | k3d clusters (platform + one per cell) on a shared Docker network; Docker Compose retired once this lands |
 | Default placement | Fill-first (target utilization 75%); when every shared cell is past the target, keep placing into the remaining room (emptiest first) with a capacity-low warning; `503` only when all are full |
 | Partition key | `tenant_id` only; a tenant lives in exactly one cell |
 | Sharding a tenant across cells | Excluded (not in v1 or roadmap) |
