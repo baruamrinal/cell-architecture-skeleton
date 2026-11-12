@@ -6,7 +6,7 @@ Reference implementation of cell-based architecture for a multi-tenant SaaS plat
 
 ## Status
 
-Planning complete. No application code yet. Work proceeds in the delivery stages in docs/plan.md §13, one stage at a time.
+Stage 1 (core platform) implemented: cell, control plane, router, `cellctl`, Dockerfile, compose, demo. Work proceeds in the delivery stages in docs/plan.md §13, one stage at a time.
 
 ## Working agreements
 
@@ -53,7 +53,7 @@ deploy/docker-compose.yml, Dockerfile
 docs/
 ```
 
-## Commands (available once stage 1 lands)
+## Commands
 
 ```powershell
 python -m venv .venv; .venv\Scripts\Activate.ps1

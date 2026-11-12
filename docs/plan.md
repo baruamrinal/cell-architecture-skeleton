@@ -71,6 +71,33 @@ client ──X-Tenant-ID──► Router ───────────┼─
 - Stamps `X-Cell-ID` on every response.
 - `/internal/*` endpoints (provision, freeze, export, import, delete) require per-cell credentials.
 
+### 2.3 Control plane access
+
+The control plane is never public. Callers, their APIs and credentials:
+
+| Caller | API | Credential | Allowed |
+|---|---|---|---|
+| Operators | Admin API (`/v1/cells`, `/v1/tenants`, …) | Admin credential | Full admin |
+| CI/CD workflows | Admin API | CI credential (AWS: GitHub OIDC role) | Scoped per route via IAM (e.g. report cell status, not move tenants) |
+| Router | Routing API (`/v1/routing/*`), **read-only** | Router credential | Route lookups only; rejected on admin endpoints |
+| Control plane → cells | Cell `/internal/*` | One credential per cell | Only that cell |
+
+End users and tenants never reach the control plane.
+
+**Locally:** `http://localhost:8000` (OpenAPI docs at `/docs`) with tokens from compose configuration, or the `cellctl` CLI.
+
+**On AWS (stage 5):**
+```
+operators / CI ──SigV4 (IAM)──► API Gateway HTTP API ──VPC link──► control plane (private subnets)
+router (in VPC) ──Service Connect─────────────────────────────────► control plane
+```
+- Admin access goes through an **API Gateway HTTP API with IAM authorization** and a VPC link. It is pay per request with no fixed cost, reachable from GitHub-hosted runners without a VPN, scoped per route by IAM policy, and logged by CloudTrail and API Gateway access logs.
+- The router reaches it inside the VPC through Service Connect with a read-only service identity.
+- Break-glass and debugging: **SSM Session Manager port-forward** to the control plane task. It needs no bastion host or VPN, and is IAM-controlled and logged.
+- Customers of customer-hosted cells have no access to the control plane.
+
+**`cellctl` CLI:** wraps the admin API (`cellctl cells list`, `cellctl tenants create acme --tier premium`, and later `tenants move`, `schedules create`). It uses a token locally and IAM signing on AWS. Built in stage 1 and extended each stage.
+
 ---
 
 ## 3. Partitioning and placement
@@ -263,6 +290,7 @@ management
 | Cell database | Aurora Serverless v2 PostgreSQL with auto-pause | Pay for load; idle cells close to $0 |
 | Small shared cells | Shared Aurora cluster, a separate database per cell | Lower isolation level, cheaper |
 | Control plane | 1 small Fargate task + its own small Aurora database | Off the request path |
+| Control plane admin access | API Gateway HTTP API (IAM auth) + VPC link; SSM Session Manager for break-glass | Pay per request; no bastion or VPN |
 | Shared rate limiter (optional) | ElastiCache (Redis/Valkey), smallest node; created only when the flag is on | No cost when disabled |
 | Secrets | SSM Parameter Store SecureString | Free standard tier |
 | Observability | CloudWatch (7–14 day retention) + OpenTelemetry → CloudWatch / X-Ray | |
@@ -364,6 +392,7 @@ src/cellarch/
   data_plane/
     router/                       app, routing cache/resolver, rate limiter, metering, proxy
     cell/                         app, store (tenant-scoped), concurrency limiter
+  cli/                            cellctl (admin CLI)
 tests/
 scripts/demo.py
 infra/                            see §8.3
@@ -383,11 +412,11 @@ Stack: Python 3.12, FastAPI, httpx, pydantic, pytest. SQLite locally, Aurora Pos
 
 | # | Stage | Main outputs |
 |---|---|---|
-| 1 | Core platform | Cells, router (tenant routing, cache, stale-route fallback, retry), control plane (registry, fill-first placement), tenant-isolation data layer, compose, `ci.yml` app checks |
+| 1 | Core platform | Cells, router (tenant routing, cache, stale-route fallback, retry), control plane (registry, fill-first placement, separate admin/router/per-cell credentials), tenant-isolation data layer, `cellctl` (cells and tenants), Dockerfile, compose, demo. CI jobs for Docker build and compose smoke test follow in a separate `ci:` PR (protected path). |
 | 2 | Traffic protection | `RateLimiter` interface, in-memory token bucket with automatic N-router share, Redis-backed limiter (off by default, fails open), tier and override limits, metering, cell request cap. WAF rate rule follows in stage 5. |
 | 3 | Tenant moves | Move procedure, promote/demote, drain, consolidate, audit log |
 | 4 | Seasonal scaling | Schedules, scheduler, standby-pool provisioner, season limits |
-| 5 | Infrastructure | Terraform bootstrap, modules, platform and cell stacks, dev environment, security guardrails, Terraform checks in CI |
+| 5 | Infrastructure | Terraform bootstrap, modules, platform and cell stacks, dev environment, security guardrails, control plane admin access (API Gateway + IAM, SSM runbook), `cellctl` IAM signing, Terraform checks in CI |
 | 6 | Delivery automation | `cd.yml` with release waves, `cell-lifecycle.yml`, GitHub-workflow provisioner, `drift.yml` |
 | 7 | Customer-hosted cells | `hosting` field and per-cell credentials (app), customer-bootstrap (CloudFormation + Terraform), PrivateLink module, cross-account image sharing, cross-account move via S3, metadata-only telemetry, maintenance windows, break-glass runbook |
 | 8 | Documentation | Architecture, cost model, security, deployment models, runbooks |
@@ -460,5 +489,6 @@ All code, application and infrastructure, is written test-first.
 | Rate-limit algorithm | Token bucket (no leaky bucket) |
 | Rate limiting across routers | In-memory with automatic N-router share + WAF rate rule; Redis-backed limiter built, off by default, fails open |
 | PR approver | `github-actions[bot]` policy gate (§9.1); no AI review, no secrets |
+| Control plane access | Never public; separate admin, router (read-only) and per-cell credentials; AWS: API Gateway HTTP API with IAM auth + VPC link, SSM for break-glass; `cellctl` CLI |
 | Merge strategy | Squash merge only; PR title (conventional commits) becomes the commit message |
 | Customer-hosted cells | Built in v1 (model 3); fully self-hosted later |
