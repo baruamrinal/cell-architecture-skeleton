@@ -381,3 +381,17 @@ def test_port_in_use_checks_a_real_socket() -> None:
         server.listen()
         assert dev.port_in_use(server.getsockname()[1])
     assert not dev.port_in_use(1)
+
+
+def test_runs_with_the_standard_library_only() -> None:
+    """make up runs before .venv exists, so dev.py must not need installed packages."""
+    import subprocess
+    import sys
+
+    scripts = Path(dev.__file__).parent
+    code = f"import sys; sys.path.insert(0, {str(scripts)!r}); import dev; print('ok')"
+    result = subprocess.run(  # noqa: S603 - fixed command
+        [sys.executable, "-S", "-c", code], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"

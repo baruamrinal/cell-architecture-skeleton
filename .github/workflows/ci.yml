@@ -99,7 +99,9 @@ jobs:
           base="https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}"
           curl -sSfL "$base/k3d-linux-amd64" -o k3d
           curl -sSfL "$base/checksums.txt" -o checksums.txt
-          grep " k3d-linux-amd64$" checksums.txt | sed 's/k3d-linux-amd64/k3d/' | sha256sum -c -
+          tr -d '\r' < checksums.txt | awk '$NF ~ /k3d-linux-amd64$/ {print $1"  k3d"}' > k3d.sha256
+          test -s k3d.sha256 || { echo "k3d-linux-amd64 not found in checksums.txt"; cat checksums.txt; exit 1; }
+          sha256sum -c k3d.sha256
           sudo install -m 0755 k3d /usr/local/bin/k3d
           k3d version
 

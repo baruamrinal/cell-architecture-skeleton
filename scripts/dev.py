@@ -37,8 +37,8 @@ from cellarch.cli.clusters import (  # noqa: E402
     LocalClusters,
     cell_url,
 )
-from cellarch.common.contracts import is_valid_tenant_id  # noqa: E402
 from cellarch.common.dotenv import load_env_file, parse_env  # noqa: E402
+from cellarch.common.ids import is_valid_tenant_id  # noqa: E402
 
 __all__ = ["parse_env"]  # re-exported for callers of this module
 
