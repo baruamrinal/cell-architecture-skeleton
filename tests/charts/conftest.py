@@ -17,8 +17,6 @@ import yaml
 CHARTS = Path(__file__).resolve().parents[2] / "charts"
 HELM = shutil.which("helm")
 
-pytestmark = pytest.mark.skipif(HELM is None, reason="helm is not installed")
-
 
 class RenderError(Exception):
     """`helm template` failed (e.g. a required value is missing)."""
@@ -38,7 +36,8 @@ def render(chart: str, values: dict[str, Any] | None = None) -> list[dict[str, A
 
 
 def lint(chart: str, values: dict[str, Any]) -> subprocess.CompletedProcess[str]:
-    assert HELM is not None
+    if HELM is None:  # pragma: no cover - depends on the machine
+        pytest.skip("helm is not installed")
     args = [HELM, "lint", str(CHARTS / chart), "--strict"]
     for key, value in _flatten(values).items():
         args += ["--set-json", f"{key}={json.dumps(value)}"]

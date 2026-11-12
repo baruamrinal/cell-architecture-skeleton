@@ -17,8 +17,8 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from cellarch.common.clock import Clock
-from cellarch.common.db import connect
 from cellarch.common.errors import ApiError
+from cellarch.common.sql import Database
 
 IDEMPOTENCY_HEADER = "Idempotency-Key"
 REPLAY_HEADER = "Idempotent-Replay"
@@ -37,25 +37,25 @@ def request_fingerprint(payload: Any) -> str:
 class IdempotencyStore:
     def __init__(
         self,
-        db_path: str,
+        db: Database,
         namespace: str,
         *,
         ttl_seconds: float = 24 * 3600,
         clock: Clock = time.time,
     ) -> None:
-        self._db_path = db_path
+        self._db = db
         self._table = f"{namespace}_idempotency_keys"
         self._ttl = ttl_seconds
         self._clock = clock
-        with connect(db_path) as conn:
+        with db.connect(lock=self._table) as conn:
             conn.execute(
                 f"CREATE TABLE IF NOT EXISTS {self._table} (key TEXT PRIMARY KEY, "
                 "fingerprint TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL, "
-                "created_at REAL NOT NULL)"
+                "created_at DOUBLE PRECISION NOT NULL)"
             )
 
     def lookup(self, key: str, fingerprint: str) -> tuple[int, Any] | None:
-        with connect(self._db_path) as conn:
+        with self._db.connect() as conn:
             row = conn.execute(
                 f"SELECT * FROM {self._table} WHERE key = ?",  # noqa: S608
                 (key,),
@@ -70,10 +70,13 @@ class IdempotencyStore:
         return int(row["status"]), json.loads(row["body"])
 
     def save(self, key: str, fingerprint: str, status: int, body: Any) -> None:
-        with connect(self._db_path) as conn:
+        with self._db.connect() as conn:
             conn.execute(
-                f"INSERT OR REPLACE INTO {self._table} "  # noqa: S608
-                "(key, fingerprint, status, body, created_at) VALUES (?, ?, ?, ?, ?)",
+                f"INSERT INTO {self._table} "  # noqa: S608
+                "(key, fingerprint, status, body, created_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET fingerprint = excluded.fingerprint, "
+                "status = excluded.status, body = excluded.body, "
+                "created_at = excluded.created_at",
                 (key, fingerprint, status, json.dumps(body), self._clock()),
             )
 

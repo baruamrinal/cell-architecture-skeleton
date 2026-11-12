@@ -18,6 +18,28 @@ jobs:
     name: lint-type-test
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Real Postgres and Redis for the adapter tests (A41, A42-A49 on PostgreSQL and the
+    # storage contract tests); without them those tests are skipped. Throwaway, CI-only
+    # credentials on a job-local network.
+    services:
+      postgres:
+        image: postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+        env:
+          POSTGRES_USER: cellarch
+          POSTGRES_PASSWORD: ci-only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cellarch" --health-interval 2s
+          --health-timeout 5s --health-retries 15
+      redis:
+        image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s
+          --health-timeout 5s --health-retries 15
+    env:
+      POSTGRES_URL: postgresql://cellarch:ci-only@127.0.0.1:5432/postgres
+      REDIS_URL: redis://127.0.0.1:6379/0
     steps:
       - uses: actions/checkout@v7
         with:
