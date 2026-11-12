@@ -11,6 +11,8 @@ client ──X-Tenant-ID──► router ──► cell-1  (app + own DB)   ← 
                      control plane (cells, tenants, placement)
 ```
 
+It's a skeleton with an **enterprise design**: production differs only in how much is implemented, not in how it's structured. [docs/production-architecture.md](docs/production-architecture.md) shows how each local piece maps to AWS, plus high availability, disaster recovery, security, observability and cost.
+
 The full design is in [docs/plan.md](docs/plan.md): placement, rate limiting, tenant moves, seasonal cells, customer-hosted cells, AWS infrastructure, CI/CD and security guardrails.
 
 ## Status

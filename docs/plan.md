@@ -13,6 +13,26 @@ Status: **plan approved for v1, not yet implemented.**
 3. **Cost-effective**: few, well-filled cells. Seasonal and standby capacity scales to zero. Costs are attributable per cell and per tenant.
 4. **Automated**: every cell is stamped from one Terraform module and rolled out in waves by CI/CD. A new cell is secure and observable by construction.
 5. **Hosting-flexible**: a cell can run in our AWS account or in a customer's AWS account.
+6. **Enterprise design, skeleton implementation**: the structure is production-grade from day one; only the amount of implementation is minimal (§1.1).
+
+### 1.1 Enterprise design principles
+
+This is a skeleton, but it must meet an enterprise design: it differs from production only in *how much* is implemented, never in *how it is structured*. Every change must satisfy:
+
+1. **A production equivalent exists and is documented** in [production-architecture.md](production-architecture.md). Local stand-ins (SQLite, Docker, tokens in `.env`) sit behind the same interface as their production counterparts (Aurora, ECS, Secrets Manager).
+2. **No shortcuts in the boundaries:**
+   - control plane vs data plane, cells sharing nothing, per-tenant data and runtime;
+   - internal APIs never exposed;
+   - one credential per role.
+3. **Secure by default:** no secrets in git or logs, non-root and read-only containers, pinned and scanned images, validated input, no echoing of submitted values.
+4. **Operable:**
+   - structured logs carrying `request_id`, `tenant_id` and `cell_id`;
+   - separate liveness (`/healthz`) and readiness (`/readyz`);
+   - graceful shutdown;
+   - versioned schema migrations;
+   - configuration validated at startup and documented.
+5. **Stable APIs:** versioned paths (`/v1`), one error shape, cursor pagination for lists, idempotency keys on creates.
+6. **Tested like production:** TDD, acceptance criteria per behavior, real-dependency adapter tests (Postgres, Redis, Docker) in CI.
 
 ---
 
