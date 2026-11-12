@@ -116,3 +116,36 @@ class TestSettings:
         monkeypatch.setenv("STACK_TOKEN", "s")
         with pytest.raises(ValueError, match="TENANT_ID"):
             ServiceSettings.from_env()
+
+
+def test_migration_namespaces_are_validated(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="namespace"):
+        apply_migrations(str(tmp_path / "t.db"), "Bad-Name", [])
+
+
+@pytest.mark.parametrize("after", [-1, "1", True])
+def test_cursors_must_hold_a_valid_position(after: object) -> None:
+    import base64
+    import json
+
+    raw = base64.urlsafe_b64encode(json.dumps({"after": after}).encode()).decode()
+    with pytest.raises(ValueError, match="cursor"):
+        decode_cursor(raw)
+
+
+def test_only_successful_responses_are_stored(tmp_path: Path) -> None:
+    import asyncio
+
+    from cellarch.services.common.idempotency import idempotent
+
+    store = IdempotencyStore(str(tmp_path / "t.db"), "demo")
+    calls: list[int] = []
+
+    async def failing() -> tuple[int, object]:
+        calls.append(1)
+        return 400, {"error": "nope"}
+
+    for _ in range(2):
+        response = asyncio.run(idempotent(store, "k1", {"a": 1}, failing))
+        assert response.status_code == 400
+    assert len(calls) == 2  # not replayed: the client can retry and succeed
