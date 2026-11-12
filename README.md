@@ -306,6 +306,10 @@ src/cellarch/
   data_plane/router/       tenant routing, route cache with stale fallback, proxy
   data_plane/cell/         tenant-scoped store and API, /internal provisioning
   cli/                     cellctl and its local Docker runner (cells deploy/decommission)
+  services/                per-tenant microservices (stage 2.5; wired into cells next)
+    common/                migrations, idempotency keys, cursor pagination, auth, health probes
+    user_account/          a tenant's users
+    order_processing/      a tenant's orders (checks users via its own user-account)
 tests/acceptance/          stage acceptance tests against the in-process platform
 tests/unit/                unit tests per component
 scripts/demo.py            end-to-end walkthrough (also the compose smoke test)
