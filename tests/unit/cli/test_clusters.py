@@ -79,7 +79,7 @@ def test_ensure_cluster_creates_a_lean_cluster_on_the_private_network() -> None:
     assert "--no-lb" in create
     assert "--api-port 127.0.0.1:6600" in create  # never host.docker.internal
     assert "--disable=traefik@server:0" in create
-    assert "-p 127.0.0.1:8080:8080@server:0" in create
+    assert "-p 127.0.0.1:8080:8080@server:0:direct" in create
 
 
 def test_ensure_cluster_starts_a_stopped_cluster_and_leaves_a_running_one() -> None:

@@ -150,7 +150,7 @@ class LocalClusters:
             "--wait", "--timeout", "180s",
         ]  # fmt: skip
         for port in ports:
-            cmd += ["-p", f"{port}@server:0"]
+            cmd += ["-p", f"{port}@server:0:direct"]  # no LB: map on the node
         self._exec(cmd)
 
     def stop(self, short: str) -> None:
