@@ -539,8 +539,8 @@ All code, application and infrastructure, is written test-first.
 | Unit | Pure logic: placement strategies, token bucket, N-router share, routing cache, schedule state machine, move-step rollback | pytest, injected clock, in-memory fakes | Milliseconds |
 | Contract | Wire contracts between router ↔ control plane and control plane ↔ cell (routing entry, `/internal` API); both sides tested against the same schemas | pytest + shared pydantic models | Fast |
 | In-process integration | The full platform wired with httpx ASGI transports, no Docker: onboarding, routing, isolation, `/internal` blocking, rate limits, stale-route fallback, cell outage blast radius, moves and rollback, the seasonal lifecycle, customer-cell credential isolation | pytest | Seconds |
-| Adapter | Redis limiter including fail-open; Postgres storage including row-level security | pytest against Redis/Postgres service containers in CI | Seconds |
-| Smoke | `docker compose up` + `scripts/demo.py` | CI | Minutes |
+| Adapter | Redis limiter including fail-open; the storage interface and the tenant services (A42–A49) on PostgreSQL | pytest against Postgres 17 and Redis service containers in CI (`POSTGRES_URL`, `REDIS_URL`); skipped locally without them | Seconds |
+| Smoke | `make up` (k3d clusters) + `scripts/demo.py` | CI | Minutes |
 | Infrastructure | Module behavior via native `terraform test` (mocked providers, no AWS cost); security guardrails as policy tests (Checkov custom checks) | terraform test, Checkov, tflint | Fast |
 | Infrastructure (optional) | Real apply in the dev account | Terratest | Minutes |
 
@@ -600,3 +600,4 @@ All code, application and infrastructure, is written test-first.
 | Local cell deploy | `cellctl cells deploy/decommission` drives Docker on the operator's machine; the control plane never gets the Docker socket (it would mean root on the host). On AWS the same commands trigger `cell-lifecycle.yml` (stage 6) |
 | Merge strategy | Squash merge only; PR title (conventional commits) becomes the commit message |
 | Customer-hosted cells | Built in v1 (model 3); fully self-hosted later |
+| Tenant service storage | One `Database` interface (`common/sql.py`) chosen by `DATABASE_URL`: PostgreSQL (psycopg 3) in cells and on Aurora, SQLite as the in-process stand-in. Portable SQL (`?` placeholders, dict rows, `{seq_pk}` identity keys), driver errors mapped to `IntegrityError` / `DatabaseError`, migrations serialised by a per-namespace lock (Postgres advisory lock). Postgres major version 17 to match Aurora |

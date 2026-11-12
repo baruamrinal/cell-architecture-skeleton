@@ -7,7 +7,6 @@ reading user-account's tables, and never calling another tenant's or cell's serv
 
 import json
 import os
-import sqlite3
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -20,9 +19,10 @@ from fastapi import FastAPI, Header, Query, Response
 from pydantic import BaseModel, Field
 
 from cellarch.common.config import require_env
-from cellarch.common.db import connect, utcnow
+from cellarch.common.db import utcnow
 from cellarch.common.errors import ApiError
 from cellarch.common.headers import INTERNAL_TOKEN_HEADER, TENANT_HEADER
+from cellarch.common.sql import Row, open_database
 from cellarch.services.common.app import create_service_app, tenant_api
 from cellarch.services.common.idempotency import IDEMPOTENCY_HEADER, IdempotencyStore, idempotent
 from cellarch.services.common.migrations import Migration, apply_migrations
@@ -36,9 +36,9 @@ MIGRATIONS = [
         1,
         "create orders",
         "CREATE TABLE order_processing_orders ("
-        "id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, "
-        "status TEXT NOT NULL, lines TEXT NOT NULL, total_cents INTEGER NOT NULL, "
-        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, seq INTEGER NOT NULL UNIQUE); "
+        "seq {seq_pk}, id TEXT NOT NULL UNIQUE, tenant_id TEXT NOT NULL, "
+        "user_id TEXT NOT NULL, status TEXT NOT NULL, lines TEXT NOT NULL, "
+        "total_cents BIGINT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL); "
         "CREATE INDEX ix_order_processing_orders_user "
         "ON order_processing_orders (tenant_id, user_id, seq)",
     ),
@@ -110,7 +110,7 @@ class UserDirectory:
         raise DependencyUnavailableError(f"user-account answered HTTP {response.status_code}")
 
 
-def _order(row: sqlite3.Row) -> Order:
+def _order(row: Row) -> Order:
     return Order.model_validate({**dict(row), "lines": json.loads(row["lines"])})
 
 
@@ -118,11 +118,11 @@ def create_app(
     settings: OrderSettings | None = None, *, http_client: httpx.AsyncClient | None = None
 ) -> FastAPI:
     settings = settings or OrderSettings.from_env()
-    apply_migrations(settings.db_path, NAMESPACE, MIGRATIONS)
-    idempotency = IdempotencyStore(settings.db_path, NAMESPACE)
+    db, tenant = open_database(settings.database_url), settings.tenant_id
+    apply_migrations(db, NAMESPACE, MIGRATIONS)
+    idempotency = IdempotencyStore(db, NAMESPACE)
     http = http_client or httpx.AsyncClient(timeout=float(os.environ.get("CALL_TIMEOUT", "5")))
     users = UserDirectory(http, settings)
-    db, tenant = settings.db_path, settings.tenant_id
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -130,7 +130,7 @@ def create_app(
         if http_client is None:
             await http.aclose()
 
-    app = create_service_app(SERVICE, settings, lifespan)
+    app = create_service_app(SERVICE, settings, db, lifespan)
     api = tenant_api(settings)
 
     @api.post("/orders", status_code=201, response_model=Order)
@@ -149,12 +149,11 @@ def create_app(
             order_id, now = f"ord_{uuid.uuid4().hex}", utcnow()
             total = sum(line.quantity * line.unit_price_cents for line in body.lines)
             lines = [line.model_dump() for line in body.lines]
-            with connect(db) as conn:
+            with db.connect() as conn:
                 conn.execute(
                     "INSERT INTO order_processing_orders (id, tenant_id, user_id, status, lines, "
-                    "total_cents, created_at, updated_at, seq) "
-                    "VALUES (?, ?, ?, 'placed', ?, ?, ?, ?, "
-                    "(SELECT COALESCE(MAX(seq), 0) + 1 FROM order_processing_orders))",
+                    "total_cents, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 'placed', ?, ?, ?, ?)",
                     (order_id, tenant, body.user_id, json.dumps(lines), total, now, now),
                 )
             return 201, Order(
@@ -180,14 +179,14 @@ def create_app(
         if user_id is not None:
             query += " AND user_id = ?"
             params.append(user_id)
-        with connect(db) as conn:
+        with db.connect() as conn:
             rows = conn.execute(f"{query} ORDER BY seq LIMIT ?", (*params, limit + 1)).fetchall()
         items, next_cursor = page(rows, limit)
         return OrderPage(items=[_order(r) for r in items], next_cursor=next_cursor)
 
-    def find(order_id: str) -> sqlite3.Row:
-        with connect(db) as conn:
-            row: sqlite3.Row | None = conn.execute(
+    def find(order_id: str) -> Row:
+        with db.connect() as conn:
+            row = conn.execute(
                 "SELECT * FROM order_processing_orders WHERE tenant_id = ? AND id = ?",
                 (tenant, order_id),
             ).fetchone()
@@ -203,7 +202,7 @@ def create_app(
     def cancel_order(order_id: str) -> Order:
         if find(order_id)["status"] == "cancelled":
             raise ApiError(409, "order_already_cancelled", "the order is already cancelled")
-        with connect(db) as conn:
+        with db.connect() as conn:
             conn.execute(
                 "UPDATE order_processing_orders SET status = 'cancelled', updated_at = ? "
                 "WHERE tenant_id = ? AND id = ?",

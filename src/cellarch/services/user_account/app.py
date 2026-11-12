@@ -4,15 +4,15 @@ Owns the ``user_account`` namespace of the tenant's database. Other services nev
 its tables; order-processing asks this API whether a user exists.
 """
 
-import sqlite3
 import uuid
 from typing import Annotated, Any
 
 from fastapi import FastAPI, Header, Query, Response
 from pydantic import BaseModel, Field
 
-from cellarch.common.db import connect, utcnow
+from cellarch.common.db import utcnow
 from cellarch.common.errors import ApiError
+from cellarch.common.sql import IntegrityError, Row, open_database
 from cellarch.services.common.app import create_service_app, tenant_api
 from cellarch.services.common.idempotency import IDEMPOTENCY_HEADER, IdempotencyStore, idempotent
 from cellarch.services.common.migrations import Migration, apply_migrations
@@ -26,8 +26,8 @@ MIGRATIONS = [
         1,
         "create users",
         "CREATE TABLE user_account_users ("
-        "id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, email TEXT NOT NULL, "
-        "name TEXT NOT NULL, created_at TEXT NOT NULL, seq INTEGER NOT NULL UNIQUE); "
+        "seq {seq_pk}, id TEXT NOT NULL UNIQUE, tenant_id TEXT NOT NULL, "
+        "email TEXT NOT NULL, name TEXT NOT NULL, created_at TEXT NOT NULL); "
         "CREATE UNIQUE INDEX ux_user_account_users_email ON user_account_users (tenant_id, email)",
     ),
 ]
@@ -51,17 +51,17 @@ class UserPage(BaseModel):
     next_cursor: str | None
 
 
-def _user(row: sqlite3.Row) -> User:
+def _user(row: Row) -> User:
     return User(id=row["id"], email=row["email"], name=row["name"], created_at=row["created_at"])
 
 
 def create_app(settings: ServiceSettings | None = None) -> FastAPI:
     settings = settings or ServiceSettings.from_env()
-    apply_migrations(settings.db_path, NAMESPACE, MIGRATIONS)
-    idempotency = IdempotencyStore(settings.db_path, NAMESPACE)
-    db, tenant = settings.db_path, settings.tenant_id
+    db, tenant = open_database(settings.database_url), settings.tenant_id
+    apply_migrations(db, NAMESPACE, MIGRATIONS)
+    idempotency = IdempotencyStore(db, NAMESPACE)
 
-    app = create_service_app(SERVICE, settings)
+    app = create_service_app(SERVICE, settings, db)
     api = tenant_api(settings)
 
     @api.post("/users", status_code=201, response_model=User)
@@ -72,14 +72,13 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
         async def handler() -> tuple[int, Any]:
             user_id, email, now = f"usr_{uuid.uuid4().hex}", body.email.lower(), utcnow()
             try:
-                with connect(db) as conn:
+                with db.connect() as conn:
                     conn.execute(
-                        "INSERT INTO user_account_users "
-                        "(id, tenant_id, email, name, created_at, seq) VALUES (?, ?, ?, ?, ?, "
-                        "(SELECT COALESCE(MAX(seq), 0) + 1 FROM user_account_users))",
+                        "INSERT INTO user_account_users (id, tenant_id, email, name, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
                         (user_id, tenant, email, body.name, now),
                     )
-            except sqlite3.IntegrityError as exc:
+            except IntegrityError as exc:
                 raise ApiError(409, "email_exists", "a user with this email exists") from exc
             return 201, User(id=user_id, email=email, name=body.name, created_at=now)
 
@@ -90,7 +89,7 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
         limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
         cursor: str | None = None,
     ) -> UserPage:
-        with connect(db) as conn:
+        with db.connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM user_account_users WHERE tenant_id = ? AND seq > ? "
                 "ORDER BY seq LIMIT ?",
@@ -99,9 +98,9 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
         items, next_cursor = page(rows, limit)
         return UserPage(items=[_user(r) for r in items], next_cursor=next_cursor)
 
-    def find(user_id: str) -> sqlite3.Row:
-        with connect(db) as conn:
-            row: sqlite3.Row | None = conn.execute(
+    def find(user_id: str) -> Row:
+        with db.connect() as conn:
+            row = conn.execute(
                 "SELECT * FROM user_account_users WHERE tenant_id = ? AND id = ?",
                 (tenant, user_id),
             ).fetchone()
@@ -116,7 +115,7 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
     @api.delete("/users/{user_id}", status_code=204)
     def delete_user(user_id: str) -> Response:
         find(user_id)
-        with connect(db) as conn:
+        with db.connect() as conn:
             conn.execute(
                 "DELETE FROM user_account_users WHERE tenant_id = ? AND id = ?", (tenant, user_id)
             )

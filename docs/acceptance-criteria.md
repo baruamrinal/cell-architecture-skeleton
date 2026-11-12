@@ -98,5 +98,8 @@ What each delivery stage must do, in plain language. The precise, executable ver
 | A46 | more users or orders than one page | they are listed with a `limit` | results come in creation order with a `next_cursor`, and following the cursors returns every record exactly once |
 | A47 | a service of one tenant | it is called without the stack's credential, or for another tenant | it is rejected (`401`, or `421 tenant_mismatch`) |
 | A48 | a service's database | the service starts, or `/healthz` and `/readyz` are called | versioned migrations are applied once and recorded; `/healthz` answers while the process is alive, `/readyz` only while its database works |
+| A49 | several instances of a service starting at the same time against one database | each applies migrations | every migration is applied exactly once and every instance starts |
+
+A42–A49 run on the SQLite stand-in and, when `POSTGRES_URL` points at a Postgres server, on PostgreSQL (the production engine).
 
 Stage 1 also has a demo acceptance check: `scripts/demo.py` runs end-to-end against the in-process platform (`tests/acceptance/test_demo.py`) and against the real compose stack in CI (`compose-smoke`).

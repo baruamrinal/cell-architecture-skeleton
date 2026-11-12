@@ -1,16 +1,16 @@
-"""Stage 2.5 acceptance tests: one tenant's service stack (A42-A48).
+"""Stage 2.5 acceptance tests: one tenant's service stack (A42-A49).
 
 user-account and order-processing run in-process as the tenant's own services,
 sharing the tenant's database, with order-processing calling user-account over
-HTTP exactly as it does between containers.
+HTTP exactly as it does between containers. Every test runs on SQLite and, when
+``POSTGRES_URL`` is set, on PostgreSQL (tests/conftest.py).
 """
 
 from __future__ import annotations
 
-import sqlite3
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from cellarch.common.headers import INTERNAL_TOKEN_HEADER, TENANT_HEADER
+from cellarch.common.sql import DatabaseError, open_database
 from cellarch.services.common.settings import ServiceSettings
 from cellarch.services.order_processing.app import OrderSettings
 from cellarch.services.order_processing.app import create_app as create_order_processing
@@ -34,7 +35,7 @@ class Stack:
     users: TestClient
     orders: TestClient
     user_account: Switch
-    db_path: Path
+    database_url: str
 
     def create_user(self, email: str = "ana@acme.test", **headers: str) -> httpx.Response:
         response: httpx.Response = self.users.post(
@@ -55,9 +56,9 @@ class Stack:
 
 
 @pytest.fixture
-def stack(tmp_path: Path) -> Iterator[Stack]:
-    db_path = tmp_path / "tenant-acme.db"  # the tenant's one database, shared by both services
-    common = {"tenant_id": "acme", "stack_token": STACK_TOKEN, "db_path": str(db_path)}
+def stack(database_url: str) -> Iterator[Stack]:
+    # The tenant's one database, shared by both services.
+    common = {"tenant_id": "acme", "stack_token": STACK_TOKEN, "database_url": database_url}
     user_account = Switch(create_user_account(ServiceSettings(**common)))
     order_processing = create_order_processing(
         OrderSettings(**common, user_account_url=USER_ACCOUNT_URL),
@@ -70,7 +71,7 @@ def stack(tmp_path: Path) -> Iterator[Stack]:
         TestClient(user_account, base_url=USER_ACCOUNT_URL, headers=headers) as users,
         TestClient(order_processing, base_url="http://order-processing", headers=headers) as orders,
     ):
-        yield Stack(users, orders, user_account, db_path)
+        yield Stack(users, orders, user_account, database_url)
 
 
 def test_a42_a_user_places_an_order_and_cancels_it_once(stack: Stack) -> None:
@@ -170,29 +171,49 @@ def test_a47_services_accept_only_their_stack_and_tenant(
         assert (response.status_code, response.json()["error"]) == (status, error)
 
 
-def test_a48_migrations_and_health_probes(
-    stack: Stack, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a48_migrations_and_health_probes(stack: Stack, monkeypatch: pytest.MonkeyPatch) -> None:
     # Starting the services again must not re-apply migrations.
-    common = {"tenant_id": "acme", "stack_token": STACK_TOKEN, "db_path": str(stack.db_path)}
+    common = {"tenant_id": "acme", "stack_token": STACK_TOKEN, "database_url": stack.database_url}
     create_user_account(ServiceSettings(**common))
-    with sqlite3.connect(stack.db_path) as conn:
+    with open_database(stack.database_url).connect() as conn:
         users_versions = conn.execute(
             "SELECT version FROM user_account_schema_migrations ORDER BY version"
         ).fetchall()
         orders_versions = conn.execute(
             "SELECT version FROM order_processing_schema_migrations ORDER BY version"
         ).fetchall()
-    assert users_versions == [(1,)]
-    assert orders_versions == [(1,)]
+    assert users_versions == [{"version": 1}]
+    assert orders_versions == [{"version": 1}]
 
     assert stack.users.get("/healthz").json()["service"] == "user-account"
     assert stack.orders.get("/readyz").status_code == 200
 
-    def broken_database(*args: object, **kwargs: object) -> object:
-        raise sqlite3.OperationalError("database is unavailable")
+    def broken_database() -> None:
+        raise DatabaseError("database is unavailable")
 
-    monkeypatch.setattr("cellarch.services.common.app.connect", broken_database)
+    monkeypatch.setattr(stack.user_account.app.state.database, "ping", broken_database)  # type: ignore[attr-defined]
     not_ready = stack.users.get("/readyz")
     assert (not_ready.status_code, not_ready.json()["error"]) == (503, "not_ready")
     assert stack.users.get("/healthz").status_code == 200  # alive, just not ready
+
+
+def test_a49_instances_starting_together_migrate_once(database_url: str) -> None:
+    common = {"tenant_id": "acme", "stack_token": STACK_TOKEN, "database_url": database_url}
+    errors: list[BaseException] = []
+
+    def start() -> None:
+        try:
+            create_user_account(ServiceSettings(**common))
+        except BaseException as exc:  # reported below, not lost in the thread
+            errors.append(exc)
+
+    instances = [threading.Thread(target=start) for _ in range(4)]
+    for instance in instances:
+        instance.start()
+    for instance in instances:
+        instance.join()
+
+    assert errors == []
+    with open_database(database_url).connect() as conn:
+        versions = conn.execute("SELECT version FROM user_account_schema_migrations").fetchall()
+    assert versions == [{"version": 1}]

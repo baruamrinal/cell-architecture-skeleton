@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from cellarch.common.headers import INTERNAL_TOKEN_HEADER, TENANT_HEADER
+from cellarch.common.sql import sqlite_url
 from cellarch.services.common.settings import ServiceSettings
 from cellarch.services.order_processing.app import OrderSettings
 from cellarch.services.order_processing.app import create_app as create_orders
@@ -16,13 +17,15 @@ HEADERS = {INTERNAL_TOKEN_HEADER: "tok", TENANT_HEADER: "acme"}
 
 
 def users_client(tmp_path: Path) -> TestClient:
-    app = create_users(ServiceSettings("acme", "tok", str(tmp_path / "acme.db")))
+    app = create_users(ServiceSettings("acme", "tok", sqlite_url(tmp_path / "acme.db")))
     return TestClient(app, headers=HEADERS)
 
 
 def orders_client(tmp_path: Path, handler: httpx.MockTransport) -> TestClient:
     app = create_orders(
-        OrderSettings("acme", "tok", str(tmp_path / "acme.db"), user_account_url="http://ua"),
+        OrderSettings(
+            "acme", "tok", sqlite_url(tmp_path / "acme.db"), user_account_url="http://ua"
+        ),
         http_client=httpx.AsyncClient(transport=handler),
     )
     return TestClient(app, headers=HEADERS)
@@ -125,11 +128,13 @@ class TestOrderProcessing:
     def test_settings_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("TENANT_ID", "acme")
         monkeypatch.setenv("STACK_TOKEN", "s")
-        monkeypatch.setenv("TENANT_DB_PATH", "/data/acme.db")
+        monkeypatch.setenv("DATABASE_URL", "sqlite:///data/acme.db")
         monkeypatch.setenv("USER_ACCOUNT_URL", "http://ua:8000")
         assert OrderSettings.from_env().user_account_url == "http://ua:8000"
 
     def test_owned_http_client_is_closed(self, tmp_path: Path) -> None:
-        app = create_orders(OrderSettings("acme", "tok", str(tmp_path / "a.db"), "http://ua"))
+        app = create_orders(
+            OrderSettings("acme", "tok", sqlite_url(tmp_path / "a.db"), "http://ua")
+        )
         with TestClient(app) as client:
             assert client.get("/healthz").status_code == 200

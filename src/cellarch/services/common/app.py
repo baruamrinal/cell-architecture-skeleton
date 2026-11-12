@@ -7,7 +7,6 @@
   for the tenant this instance serves.
 """
 
-import sqlite3
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Annotated
@@ -15,11 +14,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, FastAPI, Header
 from fastapi.responses import Response
 
-from cellarch.common.db import connect
 from cellarch.common.errors import ApiError, error_response, install_error_handlers
 from cellarch.common.headers import TENANT_HEADER
 from cellarch.common.logging import configure_logging
 from cellarch.common.security import TokenAuth
+from cellarch.common.sql import Database, DatabaseError
 from cellarch.services.common.settings import ServiceSettings
 
 STACK_ROLE = "stack"
@@ -28,10 +27,11 @@ Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
 
 
 def create_service_app(
-    name: str, settings: ServiceSettings, lifespan: Lifespan | None = None
+    name: str, settings: ServiceSettings, database: Database, lifespan: Lifespan | None = None
 ) -> FastAPI:
     configure_logging(f"{name}:{settings.tenant_id}")
     app = FastAPI(title=f"{name} ({settings.tenant_id})", lifespan=lifespan)
+    app.state.database = database
     install_error_handlers(app)
 
     @app.get("/healthz")
@@ -41,9 +41,8 @@ def create_service_app(
     @app.get("/readyz", response_model=None)
     def readyz() -> dict[str, str] | Response:
         try:
-            with connect(settings.db_path) as conn:
-                conn.execute("SELECT 1")
-        except sqlite3.Error:
+            app.state.database.ping()
+        except DatabaseError:
             return error_response(503, "not_ready", f"{name} cannot reach its database")
         return {"status": "ready", "service": name}
 
