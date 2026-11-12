@@ -226,6 +226,13 @@ class TestRenderComment:
         assert "Not approved" in body
         assert "- PR title must follow conventional commits" in body
 
+    def test_comment_shows_failures_and_protected_paths_together(self) -> None:
+        pr = make_pr(title="bad", files=files(".github/workflows/ci.yml"))
+        body = render_comment(evaluate(pr, green_run()), HEAD)
+        assert "Not approved" in body
+        assert "Needs human review" in body
+        assert body.index("Not approved") < body.index("Needs human review")
+
     def test_protected_comment_asks_for_human(self) -> None:
         pr = make_pr(files=files(".github/workflows/ci.yml"))
         body = render_comment(evaluate(pr, green_run()), HEAD)
