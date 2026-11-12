@@ -11,6 +11,11 @@ Planning complete. No application code yet. Work proceeds in the delivery stages
 ## Working agreements
 
 - **Plan before code.** Propose the approach for a stage or a significant change and get agreement before writing code.
+- **Test-driven development (docs/plan.md §14).** Red → green → refactor for every behavior:
+  - Never write production code without a failing test first. Run the test and see it fail before implementing.
+  - Each stage starts with acceptance tests taken from the plan.
+  - Bug fixes start with a test that reproduces the bug.
+  - This applies to Terraform too (`terraform test`, Checkov policy checks).
 - **Cost-effective by default.** Prefer options with no fixed cost: scale to zero, nothing extra per cell, shared non-request-path services. Call out the cost impact of any new infrastructure.
 - **Record decisions.** New or changed decisions go in the decisions log (docs/plan.md §16).
 - **Git:** never commit directly to `main`. Use a branch per change (`feat/…`, `fix/…`, `docs/…`, `infra/…`) and open a PR. Commit or push only when asked.
@@ -30,7 +35,7 @@ Planning complete. No application code yet. Work proceeds in the delivery stages
 
 ## Stack
 
-- Python 3.12, FastAPI, httpx, pydantic, pytest.
+- Python 3.12, FastAPI, httpx, pydantic, pytest + pytest-cov (branch coverage ≥ 90% gate).
 - SQLite locally, Aurora Serverless v2 PostgreSQL on AWS, behind the same storage interface.
 - AWS: ECS Fargate (Graviton), ALB (router only), Service Connect, PrivateLink (customer cells), SSM Parameter Store, CloudWatch + OpenTelemetry. ElastiCache is optional, behind a flag.
 - Terraform/OpenTofu ≥ 1.10 (S3 backend, native locking). GitHub Actions with OIDC; no long-lived keys.
@@ -62,5 +67,6 @@ python scripts/demo.py                        # end-to-end walkthrough against t
 - Components are FastAPI app factories (`create_app(settings=None, http_client=None)`) so tests can wire the whole platform in-process with httpx ASGI transports.
 - Settings come from environment variables via a `from_env()` classmethod. No hard-coded endpoints or secrets.
 - Time-dependent logic (rate limiter, scheduler, route cache) takes an injectable clock. Tests never sleep.
+- Prefer in-memory fakes over mocks. Mock only external boundaries (AWS, GitHub).
 - Every response from a cell carries `X-Cell-ID`. Every log, metric and trace carries `cell_id` and `tenant_id`.
 - Headers: `X-Tenant-ID` (partition key), `X-Cell-ID`, `X-Request-ID`, `X-Internal-Token` (internal only), plus `X-RateLimit-*`.
