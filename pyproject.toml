@@ -32,7 +32,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["scripts/ci"]
+pythonpath = ["scripts", "scripts/ci"]
 addopts = "-q --strict-markers"
 
 [tool.coverage.run]
@@ -56,7 +56,7 @@ target-version = "py312"
 select = ["E", "F", "W", "I", "B", "UP", "S", "SIM"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["cellarch", "pr_gate"]
+known-first-party = ["cellarch", "pr_gate", "demo"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106"]  # asserts and fake test credentials
@@ -65,4 +65,4 @@ known-first-party = ["cellarch", "pr_gate"]
 python_version = "3.12"
 strict = true
 files = ["src", "scripts", "tests"]
-mypy_path = "scripts/ci"
+mypy_path = "scripts:scripts/ci"

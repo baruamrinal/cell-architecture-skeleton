@@ -1,0 +1,89 @@
+# Local platform: control plane, router and two shared cells.
+#
+#   docker compose -f deploy/docker-compose.yml up --build -d
+#   python scripts/demo.py
+#
+# Tokens below are development defaults; override them via environment variables.
+# Only the router (8080) and the control plane admin API (8000) are published, and
+# only on localhost. Cells are reachable only inside the compose network.
+
+name: cellarch
+
+x-app: &app
+  build:
+    context: ..
+    dockerfile: Dockerfile
+  image: cellarch:dev
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+  networks: [platform]
+
+x-healthcheck: &healthcheck
+  interval: 5s
+  timeout: 3s
+  retries: 20
+
+x-cell: &cell
+  <<: *app
+  command: ["uvicorn", "cellarch.data_plane.cell.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+  healthcheck:
+    <<: *healthcheck
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+
+services:
+  control-plane:
+    <<: *app
+    command: ["uvicorn", "cellarch.control_plane.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      CONTROL_PLANE_DB_PATH: /data/control-plane.db
+      CONTROL_PLANE_ADMIN_TOKEN: ${ADMIN_TOKEN:-dev-admin-token}
+      CONTROL_PLANE_ROUTER_TOKEN: ${ROUTER_TOKEN:-dev-router-token}
+      CELL_CREDENTIALS: cell-1=${CELL_1_TOKEN:-dev-cell-1-token},cell-2=${CELL_2_TOKEN:-dev-cell-2-token}
+      SEED_CELLS: cell-1=http://cell-1:8000,cell-2=http://cell-2:8000
+      # Small on purpose so the demo shows fill-first moving on to the next cell.
+      DEFAULT_CELL_CAPACITY: "4"
+    volumes: [control-plane-data:/data]
+    ports: ["127.0.0.1:8000:8000"]
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+
+  router:
+    <<: *app
+    command: ["uvicorn", "cellarch.data_plane.router.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      CONTROL_PLANE_URL: http://control-plane:8000
+      ROUTER_TOKEN: ${ROUTER_TOKEN:-dev-router-token}
+    ports: ["127.0.0.1:8080:8000"]
+    depends_on:
+      control-plane: { condition: service_healthy }
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/_router/healthz')"]
+
+  cell-1:
+    <<: *cell
+    environment:
+      CELL_ID: cell-1
+      CELL_DB_PATH: /data/cell-1.db
+      CELL_INTERNAL_TOKEN: ${CELL_1_TOKEN:-dev-cell-1-token}
+    volumes: [cell-1-data:/data]
+
+  cell-2:
+    <<: *cell
+    environment:
+      CELL_ID: cell-2
+      CELL_DB_PATH: /data/cell-2.db
+      CELL_INTERNAL_TOKEN: ${CELL_2_TOKEN:-dev-cell-2-token}
+    volumes: [cell-2-data:/data]
+
+volumes:
+  control-plane-data:
+  cell-1-data:
+  cell-2-data:
+
+networks:
+  platform: {}
