@@ -93,8 +93,36 @@ def test_create_get_and_list_tenants(
 
     assert run(control_plane, "tenants", "list") == 0
     lines = capsys.readouterr().out.splitlines()
-    assert lines[0].split() == ["TENANT", "NAME", "TIER", "CELL", "STATUS", "CREATED", "BY"]
-    assert lines[1].split() == ["acme", "Acme", "premium", "cell-1", "active", "admin:tester"]
+    assert lines[0].split() == [
+        "TENANT",
+        "NAME",
+        "TIER",
+        "ISOLATION",
+        "CELL",
+        "STATUS",
+        "CREATED",
+        "BY",
+    ]
+    assert lines[1].split() == [
+        "acme",
+        "Acme",
+        "premium",
+        "isolated",
+        "cell-1",
+        "active",
+        "admin:tester",
+    ]
+
+
+def test_create_tenant_with_explicit_isolation(
+    control_plane: TestClient, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run(control_plane, "cells", "register", "cell-1", "http://cell-1")
+    capsys.readouterr()
+    assert run(control_plane, "tenants", "create", "globex", "--isolation", "pooled") == 0
+    assert json.loads(capsys.readouterr().out)["isolation"] == "pooled"
+    with pytest.raises(SystemExit):
+        run(control_plane, "tenants", "create", "initech", "--isolation", "silo")
 
 
 def test_tenant_name_defaults_to_id(

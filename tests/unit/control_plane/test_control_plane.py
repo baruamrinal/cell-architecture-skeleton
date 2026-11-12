@@ -204,6 +204,25 @@ class TestSettings:
         assert settings.seed_cells == {"cell-1": "http://cell-1:8000"}
         assert (settings.default_cell_capacity, settings.target_utilization) == (50, 0.8)
 
+    @pytest.mark.parametrize(("value", "expected"), [(None, "isolated"), ("pooled", "pooled")])
+    def test_default_tenant_isolation(
+        self, monkeypatch: pytest.MonkeyPatch, value: str | None, expected: str
+    ) -> None:
+        monkeypatch.setenv("CONTROL_PLANE_ADMIN_TOKEN", "a")
+        monkeypatch.setenv("CONTROL_PLANE_ROUTER_TOKEN", "r")
+        if value is None:
+            monkeypatch.delenv("DEFAULT_TENANT_ISOLATION", raising=False)
+        else:
+            monkeypatch.setenv("DEFAULT_TENANT_ISOLATION", value)
+        assert ControlPlaneSettings.from_env().default_isolation == expected
+
+    def test_invalid_default_tenant_isolation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CONTROL_PLANE_ADMIN_TOKEN", "a")
+        monkeypatch.setenv("CONTROL_PLANE_ROUTER_TOKEN", "r")
+        monkeypatch.setenv("DEFAULT_TENANT_ISOLATION", "silo")
+        with pytest.raises(ConfigError, match="DEFAULT_TENANT_ISOLATION"):
+            ControlPlaneSettings.from_env()
+
     def test_seed_cell_without_credential_is_a_config_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -15,6 +15,8 @@ CellStatus = Literal["active", "draining", "disabled"]
 TenantStatus = Literal["provisioning", "active", "migrating"]
 PlacementMode = Literal["pooled", "dedicated"]
 Tier = Literal["standard", "premium"]
+# Does the tenant share database tables in its cell (pooled) or have its own database?
+Isolation = Literal["pooled", "isolated"]
 
 _TENANT_ID = re.compile(TENANT_ID_PATTERN)
 

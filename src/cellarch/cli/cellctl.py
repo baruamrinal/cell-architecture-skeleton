@@ -188,6 +188,11 @@ def _parser(settings: Mapping[str, str]) -> argparse.ArgumentParser:
     create.add_argument("tenant_id")
     create.add_argument("--name")
     create.add_argument("--tier", choices=["standard", "premium"], default="standard")
+    create.add_argument(
+        "--isolation",
+        choices=["isolated", "pooled"],
+        help="isolated: own database in its cell (default); pooled: shared tables",
+    )
 
     resources.add_parser("status", help="platform capacity overview and warnings")
     return parser
@@ -237,7 +242,10 @@ def _request(args: argparse.Namespace) -> tuple[str, str, dict[str, Any] | None]
             return "GET", f"/v1/tenants/{args.tenant_id}", None
         case _:  # ("tenants", "create") - argparse guarantees nothing else reaches here
             body = {"tenant_id": args.tenant_id, "name": args.name or args.tenant_id}
-            return "POST", "/v1/tenants", {**body, "tier": args.tier}
+            body["tier"] = args.tier
+            if args.isolation:  # otherwise the control plane's default applies
+                body["isolation"] = args.isolation
+            return "POST", "/v1/tenants", body
 
 
 # --- cell deploy / decommission (local Docker) ------------------------------------------
@@ -381,9 +389,17 @@ def _render(args: argparse.Namespace, data: Any) -> str:
         return json.dumps(data, indent=2)
     if args.resource == "cells":
         return _cells_table(data)
-    header = ["TENANT", "NAME", "TIER", "CELL", "STATUS", "CREATED BY"]
+    header = ["TENANT", "NAME", "TIER", "ISOLATION", "CELL", "STATUS", "CREATED BY"]
     rows = [
-        [t["tenant_id"], t["name"], t["tier"], t["cell_id"], t["status"], t["created_by"]]
+        [
+            t["tenant_id"],
+            t["name"],
+            t["tier"],
+            t["isolation"],
+            t["cell_id"],
+            t["status"],
+            t["created_by"],
+        ]
         for t in data
     ]
     return _table([header, *rows])

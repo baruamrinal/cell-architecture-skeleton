@@ -195,6 +195,7 @@ class TestLifecycleApi:
             "tenants": 0,
             "capacity": 0,
             "free_slots": 0,
+            "isolated_tenants": 0,
         }
         assert [w["code"] for w in status["warnings"]] == ["no_capacity"]
 

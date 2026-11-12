@@ -118,6 +118,21 @@ router (in VPC) ──Service Connect──────────────�
 
 **Out of scope:** splitting a single tenant across multiple cells (sharding). The largest unit of placement is one tenant on one dedicated cell, sized up via the cell profile (`small` / `medium` / `large`).
 
+### 3.4 Data isolation tiers
+
+Independent of placement: tenants share a **cell** (up to its capacity, fill-first), and each tenant's **data** is either:
+
+| `isolation` | Storage in the cell | Use for |
+|---|---|---|
+| `isolated` (**default**) | Its own database. Locally `tenants/<tenant-id>.db` in the cell's volume; on AWS a separate database in the cell's Aurora cluster | Every SaaS customer: strongest isolation short of a dedicated cell, clean deletion, per-tenant backup and restore, simpler moves |
+| `pooled` (opt-in) | Shared tables in the cell's database, separated by `tenant_id` (+ Postgres row-level security on AWS) | Free, trial, demo and very small tenants where density and cost matter most |
+
+- Set per tenant at onboarding (`cellctl tenants create x --isolation pooled`); the default is configurable (`DEFAULT_TENANT_ISOLATION`).
+- Queries filter by `tenant_id` in both tiers, as a second safeguard.
+- Removing an isolated tenant deletes its database.
+- **AWS constraint (stage 5):** each isolated tenant needs its own connection pool. Cells get a limit on isolated tenants sized to the database's connection capacity.
+- **Stage 3:** moving an isolated tenant means copying its database.
+
 ---
 
 ## 4. Rate limiting
@@ -486,6 +501,7 @@ All code, application and infrastructure, is written test-first.
 | Default placement | Fill-first (target utilization 75%); when every shared cell is past the target, keep placing into the remaining room (emptiest first) with a capacity-low warning; `503` only when all are full |
 | Partition key | `tenant_id` only; a tenant lives in exactly one cell |
 | Sharding a tenant across cells | Excluded (not in v1 or roadmap) |
+| Tenant data isolation | Per tenant: `isolated` (own database in its cell, **default**) or `pooled` (shared tables); tenants still share cells up to capacity (§3.4) |
 | Development approach | Test-driven development (red → green → refactor), outside-in per stage |
 | Rate-limit algorithm | Token bucket (no leaky bucket) |
 | Rate limiting across routers | In-memory with automatic N-router share + WAF rate rule; Redis-backed limiter built, off by default, fails open |

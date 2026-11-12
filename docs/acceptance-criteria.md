@@ -48,4 +48,13 @@ What each delivery stage must do, in plain language. The precise, executable ver
 | A25 | admin calls that name the caller (`X-Actor`, sent by `cellctl`) | a cell or tenant is created, then changed | `created_by` / `updated_by` record `admin:<name>` (or `admin` without a name) and `updated_at` moves on |
 | A26 | the admin API | the caller name has spaces, symbols, non-ASCII characters or is over 64 characters | the request is rejected with `400 invalid_actor` |
 
+### Tenant data isolation tier
+
+| ID | Given | When | Then |
+|---|---|---|---|
+| A27 | a tenant onboarded with `isolation: isolated` | it stores data | the data is in the tenant's own database on its cell, not the cell's shared database |
+| A28 | a pooled and an isolated tenant on the same cell | each lists or reads the other's items | neither can see the other's data |
+| A29 | an isolated tenant with data | it is removed from its cell | its database is deleted entirely |
+| A30 | tenant onboarding | no isolation is given, `pooled` is given, or an unknown value is given | the default is `isolated`, `pooled` is honoured, an unknown value is rejected (`422`); status counts isolated tenants per cell and in total |
+
 Stage 1 also has a demo acceptance check: `scripts/demo.py` runs end-to-end against the in-process platform (`tests/acceptance/test_demo.py`) and against the real compose stack in CI (`compose-smoke`).

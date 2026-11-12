@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, FastAPI, Header, Query, Request, Respons
 from pydantic import BaseModel, Field
 
 from cellarch.common.config import require_env
-from cellarch.common.contracts import TENANT_ID_PATTERN, is_valid_tenant_id
+from cellarch.common.contracts import TENANT_ID_PATTERN, Isolation, is_valid_tenant_id
 from cellarch.common.errors import ApiError, install_error_handlers
 from cellarch.common.headers import CELL_HEADER, TENANT_HEADER
 from cellarch.common.logging import configure_logging
@@ -50,12 +50,14 @@ class Item(BaseModel):
 
 class TenantProvision(BaseModel):
     tenant_id: str = Field(pattern=TENANT_ID_PATTERN)
+    isolation: Isolation = "pooled"
 
 
 class CellTenant(BaseModel):
     tenant_id: str
     status: str
     provisioned_at: str
+    isolation: Isolation
 
 
 def create_app(settings: CellSettings | None = None) -> FastAPI:
@@ -125,7 +127,7 @@ def create_app(settings: CellSettings | None = None) -> FastAPI:
 
     @internal.post("/tenants", status_code=201)
     def provision_tenant(body: TenantProvision) -> CellTenant:
-        return CellTenant(**store.provision_tenant(body.tenant_id))
+        return CellTenant(**store.provision_tenant(body.tenant_id, body.isolation))
 
     @internal.get("/tenants")
     def list_tenants() -> list[CellTenant]:
