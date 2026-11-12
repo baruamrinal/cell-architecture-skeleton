@@ -63,13 +63,17 @@ client ──X-Tenant-ID──► Router ───────────┼─
 - On `421 tenant_not_in_cell` it refreshes the route and retries once.
 - Blocks `/internal/*` and strips internal headers from client requests.
 
-**Cell (identical deployable unit)**
-- A sample domain API (`workspaces`, `items`) with its own database.
-- Every query is tenant-scoped through a single data-access layer.
-- Rejects tenants it doesn't host (`421`). Frozen tenants are read-only (writes get `503`).
-- A cap on requests handled at once, with immediate rejection when full.
-- Stamps `X-Cell-ID` on every response.
-- `/internal/*` endpoints (provision, freeze, export, import, delete) require per-cell credentials.
+**Cell (identical deployable unit)**: a gateway, one database server, and one service stack per tenant (§3.4).
+- **Cell gateway:** the cell's single entry point.
+  - Keeps the registry of tenants the cell hosts and where each tenant's services run.
+  - Routes `/v1/users…` → the tenant's user-account and `/v1/orders…` → the tenant's order-processing.
+  - Rejects tenants it doesn't host (`421`); frozen tenants are read-only (writes get `503`).
+  - Caps requests handled at once, rejecting the excess immediately.
+  - Stamps `X-Cell-ID` on every response.
+  - Creates and drops tenant databases on the cell's database server.
+  - Its `/internal/*` endpoints (provision, freeze, export, import, delete) require the cell's credential.
+- **Cell database server** (Postgres): one per cell, **never shared between cells**. It holds one database per tenant of the cell.
+- **Per-tenant service stack:** `user-account` and `order-processing`, the tenant's own containers, connected only to the tenant's own database.
 
 ### 2.3 Control plane access
 
@@ -118,20 +122,37 @@ router (in VPC) ──Service Connect──────────────�
 
 **Out of scope:** splitting a single tenant across multiple cells (sharding). The largest unit of placement is one tenant on one dedicated cell, sized up via the cell profile (`small` / `medium` / `large`).
 
-### 3.4 Data isolation tiers
+### 3.4 Tenant services and data
 
-Independent of placement: tenants share a **cell** (up to its capacity, fill-first), and each tenant's **data** is either:
+Tenants share a **cell** (up to its capacity, fill-first), but each tenant has **its own service containers and its own database**:
 
-| `isolation` | Storage in the cell | Use for |
-|---|---|---|
-| `isolated` (**default**) | Its own database. Locally `tenants/<tenant-id>.db` in the cell's volume; on AWS a separate database in the cell's Aurora cluster | Every SaaS customer: strongest isolation short of a dedicated cell, clean deletion, per-tenant backup and restore, simpler moves |
-| `pooled` (opt-in) | Shared tables in the cell's database, separated by `tenant_id` (+ Postgres row-level security on AWS) | Free, trial, demo and very small tenants where density and cost matter most |
+```
+cell-1
+├── gateway                         routes each tenant to its own stack
+├── postgres                        one database server per cell (never shared across cells)
+│     ├── database tenant_acme
+│     │     ├── schema user_account       login acme_user_account: this schema only
+│     │     └── schema order_processing   login acme_order_processing: this schema only
+│     └── database tenant_globex …
+├── acme-user-account  ◄──── acme-order-processing      (acme's containers)
+└── globex-user-account ◄─── globex-order-processing    (globex's containers)
+```
 
-- Set per tenant at onboarding (`cellctl tenants create x --isolation pooled`); the default is configurable (`DEFAULT_TENANT_ISOLATION`).
-- Queries filter by `tenant_id` in both tiers, as a second safeguard.
-- Removing an isolated tenant deletes its database.
-- **AWS constraint (stage 5):** each isolated tenant needs its own connection pool. Cells get a limit on isolated tenants sized to the database's connection capacity.
-- **Stage 3:** moving an isolated tenant means copying its database.
+- **One database per tenant** holds all its data: users and orders. A backup, restore, move or deletion covers the whole tenant at once, consistent across both services.
+- **One schema and login per service:** a service can only reach its own schema. Order-processing checks a user through user-account's API; there are no cross-service joins or foreign keys.
+- **Per-tenant containers:**
+  - **Fault isolation:** a crash in one tenant's services affects only that tenant.
+  - **Resource caps per tier,** per service: standard 0.25 CPU / 256 MB, premium 1 CPU / 512 MB.
+- **Noisy-neighbour limits in the shared database server:** each tenant login gets a connection limit and a statement timeout.
+- **Onboarding is a handshake,** because tenants need containers and the control plane never gets Docker access:
+  1. The control plane places the tenant (`provisioning`).
+  2. The cell gateway creates the tenant database and logins.
+  3. The operator tool (`cellctl` locally, the deployment pipeline on AWS) starts the tenant's containers.
+  4. The control plane activates the tenant once they're healthy. Any failure undoes every step.
+- **Deleting a tenant** stops its containers and drops its database.
+- **On AWS (stage 5):** every cell gets **its own Aurora Serverless v2 PostgreSQL cluster**. A new cell means a new database server. Tenant databases live in their cell's cluster, and service passwords go to Secrets Manager.
+- **Locally:** one Postgres container per cell. In-process tests use an SQLite stand-in behind the same storage interface; adapter tests run against real Postgres when `POSTGRES_URL` is set.
+- **Replaces** the earlier `pooled`/`isolated` tier: every tenant now has its own containers and database.
 
 ---
 
@@ -302,8 +323,8 @@ management
 | Router → cell (vendor-hosted) | ECS Service Connect (Cloud Map) | No load balancer per cell |
 | Router → cell (customer-hosted) | PrivateLink interface endpoint | Per-endpoint cost, built into customer pricing |
 | Cell app | ECS Fargate (Graviton) per cell | Standby and seasonal cells at 0 tasks |
-| Cell database | Aurora Serverless v2 PostgreSQL with auto-pause | Pay for load; idle cells close to $0 |
-| Small shared cells | Shared Aurora cluster, a separate database per cell | Lower isolation level, cheaper |
+| Cell database | **One Aurora Serverless v2 PostgreSQL cluster per cell** (never shared across cells), one database per tenant, one schema and login per service | Auto-pause and scale to zero keep idle cells close to $0 |
+| Tenant services | Two ECS services per tenant (user-account, order-processing) in the cell, sized by tier | The price of per-tenant fault isolation |
 | Control plane | 1 small Fargate task + its own small Aurora database | Off the request path |
 | Control plane admin access | API Gateway HTTP API (IAM auth) + VPC link; SSM Session Manager for break-glass | Pay per request; no bastion or VPN |
 | Shared rate limiter (optional) | ElastiCache (Redis/Valkey), smallest node; created only when the flag is on | No cost when disabled |
@@ -429,7 +450,8 @@ Stack: Python 3.12, FastAPI, httpx, pydantic, pytest. SQLite locally, Aurora Pos
 |---|---|---|
 | 1 | Core platform | Cells, router (tenant routing, cache, stale-route fallback, retry), control plane (registry, fill-first placement, separate admin/router/per-cell credentials), tenant-isolation data layer, `cellctl` (cells and tenants), Dockerfile, compose, demo. CI jobs for Docker build and compose smoke test follow in a separate `ci:` PR (protected path). |
 | 2 | Traffic protection | `RateLimiter` interface, in-memory token bucket with automatic N-router share, Redis-backed limiter (off by default, fails open), tier and override limits, metering, cell request cap. WAF rate rule follows in stage 5. |
-| 3 | Tenant moves | Move procedure, promote/demote, drain, consolidate, audit log |
+| 2.5 | Tenant services | Cell gateway; per-tenant `user-account` and `order-processing` containers; one Postgres server per cell with a database per tenant and a schema and login per service; onboarding handshake and tenant delete; replaces the sample `items` API and the isolation tier (§3.4) |
+| 3 | Tenant moves | Move procedure (start the tenant's stack on the target cell, copy its database, switch), promote/demote, drain, consolidate, audit log |
 | 4 | Seasonal scaling | Schedules, scheduler, standby-pool provisioner, season limits. (Local cell deploy/decommission via `cellctl` was pulled forward into stage 1; stage 4 builds the scheduler-driven provisioner on top.) |
 | 5 | Infrastructure | Terraform bootstrap, modules, platform and cell stacks, dev environment, security guardrails, control plane admin access (API Gateway + IAM, SSM runbook), `cellctl` IAM signing, Terraform checks in CI |
 | 6 | Delivery automation | `cd.yml` with release waves, `cell-lifecycle.yml`, GitHub-workflow provisioner, `drift.yml` |
@@ -501,7 +523,11 @@ All code, application and infrastructure, is written test-first.
 | Default placement | Fill-first (target utilization 75%); when every shared cell is past the target, keep placing into the remaining room (emptiest first) with a capacity-low warning; `503` only when all are full |
 | Partition key | `tenant_id` only; a tenant lives in exactly one cell |
 | Sharding a tenant across cells | Excluded (not in v1 or roadmap) |
-| Tenant data isolation | Per tenant: `isolated` (own database in its cell, **default**) or `pooled` (shared tables); tenants still share cells up to capacity (§3.4) |
+| Tenant services and data | Each tenant has its own `user-account` and `order-processing` containers and its own database, with one schema and login per service; tenants share cells up to capacity (§3.4). Replaces the pooled/isolated tier |
+| Database server | One per cell, never shared across cells: Postgres container locally, Aurora Serverless v2 cluster on AWS. A new cell gets a new database server |
+| Control plane storage | Stays SQLite for now (no tenant data); can move to Postgres later |
+| Tenant resource caps | Per service: standard 0.25 CPU / 256 MB, premium 1 CPU / 512 MB |
+| Order statuses | `placed` → `cancelled` |
 | Development approach | Test-driven development (red → green → refactor), outside-in per stage |
 | Rate-limit algorithm | Token bucket (no leaky bucket) |
 | Shared rate limiter | `RATE_LIMIT_BACKEND=redis`: atomic Lua token bucket using Redis's clock, one bucket per tenant shared by all routers (full limit, not split); fails open to the in-memory limiter with a 5 s circuit breaker and 50 ms Redis timeouts; local `redis` compose profile; ElastiCache on AWS (stage 5) |
