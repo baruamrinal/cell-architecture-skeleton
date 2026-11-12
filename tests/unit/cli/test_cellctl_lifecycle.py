@@ -328,3 +328,61 @@ def test_deploy_reports_control_plane_errors_before_touching_clusters(
     assert code == 1
     assert clusters.calls == []
     assert "unauthenticated" in capsys.readouterr().err
+
+
+class ScriptedControlPlane:
+    """Admin API whose registration answers follow a script (e.g. DNS still settling)."""
+
+    def __init__(self, registrations: list[tuple[int, str]]) -> None:
+        self.registrations = list(registrations)
+        self.attempts = 0
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/cells/cell-4":
+            return httpx.Response(404, json={"error": "cell_not_found", "message": "no"})
+        if request.method == "POST" and request.url.path == "/v1/cells":
+            self.attempts += 1
+            status, error = self.registrations.pop(0)
+            if status == 201:
+                return httpx.Response(201, json={"cell_id": "cell-4", "status": "active"})
+            return httpx.Response(status, json={"error": error, "message": "scripted"})
+        return httpx.Response(404, json={"error": "not_found", "message": request.url.path})
+
+    def deploy(self, charts: Path, clusters: Any, sleeps: list[float]) -> int:
+        client = httpx.Client(transport=httpx.MockTransport(self.handler), base_url="http://cp")
+        return main(
+            ["--charts-dir", str(charts), "cells", "deploy", "cell-4"],
+            client=client,
+            token=ADMIN,
+            clusters=clusters,
+            sleep=sleeps.append,
+        )
+
+
+class TestRegistrationWaitsForCellDns:
+    UNREACHABLE = (422, "cell_unreachable")
+
+    def test_retries_while_the_new_cell_name_is_not_resolvable_yet(self, charts: Path) -> None:
+        api = ScriptedControlPlane([self.UNREACHABLE, self.UNREACHABLE, (201, "")])
+        clusters = FakeClusters({"platform": "running"})
+        sleeps: list[float] = []
+        assert api.deploy(charts, clusters, sleeps) == 0
+        assert api.attempts == 3
+        assert len(sleeps) == 2
+        assert ("delete", "cell-4") not in clusters.calls
+
+    def test_gives_up_and_cleans_up(self, charts: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        api = ScriptedControlPlane([self.UNREACHABLE] * 50)
+        clusters = FakeClusters({"platform": "running"})
+        sleeps: list[float] = []
+        assert api.deploy(charts, clusters, sleeps) == 1
+        assert sum(sleeps) >= 60  # waited long enough for DNS to settle
+        assert ("delete", "cell-4") in clusters.calls
+        assert "cell_unreachable" in capsys.readouterr().err
+
+    def test_other_rejections_are_not_retried(self, charts: Path) -> None:
+        api = ScriptedControlPlane([(422, "cell_credential_rejected")])
+        clusters = FakeClusters({"platform": "running"})
+        sleeps: list[float] = []
+        assert api.deploy(charts, clusters, sleeps) == 1
+        assert (api.attempts, sleeps) == (1, [])

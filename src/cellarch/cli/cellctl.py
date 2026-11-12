@@ -29,7 +29,8 @@ import os
 import re
 import secrets
 import sys
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -244,6 +245,8 @@ def _request(args: argparse.Namespace) -> tuple[str, str, dict[str, Any] | None]
 
 CELL_RELEASE = "cellarch"
 GATEWAY_IMAGE = "cellarch/cell-gateway:dev"
+# The control plane may not resolve a new cell's name until cluster DNS settles.
+REGISTER_ATTEMPTS, REGISTER_DELAY_SECONDS = 21, 3.0
 # The tenants' services run in every cell cluster (tenant-stack chart).
 TENANT_IMAGES = ["cellarch/user-account:dev", "cellarch/order-processing:dev"]
 
@@ -256,7 +259,12 @@ def _sync_cell_dns(clusters: ClusterToolkit) -> None:
     clusters.set_cell_dns({cell: clusters.node_ip(cell) for cell in clusters.cell_ids()})
 
 
-def _deploy(args: argparse.Namespace, api: Api, clusters: ClusterToolkit) -> Any:
+def _deploy(
+    args: argparse.Namespace,
+    api: Api,
+    clusters: ClusterToolkit,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Any:
     cell_id = args.cell_id
     if not is_valid_tenant_id(cell_id):
         raise UsageError(
@@ -290,9 +298,17 @@ def _deploy(args: argparse.Namespace, api: Api, clusters: ClusterToolkit) -> Any
         clusters.helm_upgrade(cell_id, CELL_RELEASE, chart, values)
         _sync_cell_dns(clusters)
         _progress(f"Registering {cell_id} with the control plane...")
-        cell = api.call(
-            "POST", "/v1/cells", {**_cell_body(args, cell_url(cell_id)), "credential": credential}
-        )
+        body = {**_cell_body(args, cell_url(cell_id)), "credential": credential}
+        attempt = 1
+        while True:
+            try:
+                cell = api.call("POST", "/v1/cells", body)
+                break
+            except CommandError as exc:
+                if exc.code != "cell_unreachable" or attempt == REGISTER_ATTEMPTS:
+                    raise
+                attempt += 1
+                sleep(REGISTER_DELAY_SECONDS)
     except (CommandError, ClusterError):
         _progress(f"Deploy failed; removing cluster {cluster_name(cell_id)}...")
         try:
@@ -446,6 +462,7 @@ def main(
     token: str | None = None,
     clusters: ClusterToolkit | None = None,
     router_client: httpx.Client | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     try:
         settings = _settings()
@@ -471,7 +488,7 @@ def main(
     action = (args.resource, getattr(args, "action", None))
     try:
         if action == ("cells", "deploy"):
-            data = _deploy(args, api, clusters or LocalClusters())
+            data = _deploy(args, api, clusters or LocalClusters(), sleep)
         elif action == ("cells", "decommission"):
             data = _decommission(args, api, clusters or LocalClusters())
         elif action == ("tenants", "create"):
