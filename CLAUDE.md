@@ -56,12 +56,13 @@ docs/
 ## Commands
 
 ```powershell
-python -m venv .venv; .venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
-pytest                                        # full in-process platform tests, no Docker needed
-docker compose -f deploy/docker-compose.yml up --build
-python scripts/demo.py                        # end-to-end walkthrough against the running stack
+. .\make up                # set up/activate .venv, load .env, build, start all containers, status
+.\make down | status | build | test | setup     # macOS/Linux: make <target>
+pytest                     # full in-process platform tests, no Docker needed
+python scripts/demo.py     # end-to-end walkthrough against the running stack
 ```
+
+`make.ps1` and `Makefile` are thin wrappers around `scripts/dev.py`; put task logic there (tested in `tests/unit/scripts/`).
 
 ## Conventions
 

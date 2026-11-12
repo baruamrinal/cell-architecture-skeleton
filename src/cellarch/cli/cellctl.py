@@ -411,3 +411,7 @@ def main(
 
 def run() -> None:  # pragma: no cover - console-script entry point
     sys.exit(main())
+
+
+if __name__ == "__main__":  # pragma: no cover - `python -m cellarch.cli.cellctl`
+    run()
