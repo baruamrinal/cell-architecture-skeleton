@@ -1,6 +1,6 @@
 apiVersion: v2
 name: cell
-description: One cell's gateway, installed into that cell's own cluster (one cluster per cell). The cell's database server and tenant stacks join it in stage 2.5.
+description: One cell (gateway + its own database server), installed into that cell's own cluster (one cluster per cell). Tenant stacks are separate releases (charts/tenant-stack).
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

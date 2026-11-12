@@ -16,7 +16,6 @@ TenantStatus = Literal["provisioning", "active", "migrating"]
 PlacementMode = Literal["pooled", "dedicated"]
 Tier = Literal["standard", "premium"]
 # Does the tenant share database tables in its cell (pooled) or have its own database?
-Isolation = Literal["pooled", "isolated"]
 
 
 class RateLimit(BaseModel):

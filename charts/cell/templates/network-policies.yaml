@@ -1,6 +1,8 @@
 {{- $fullname := include "cell.fullname" . -}}
-# Deny all ingress in the cell's namespace, then allow only the gateway's port.
-# Tenant stacks (stage 2.5) add: gateway -> tenant services, services -> own database.
+# Deny all ingress in the cell's namespace, then allow only: anyone -> the gateway,
+# gateway and tenant services -> the database server. The tenant-stack chart adds
+# gateway -> tenant services and order-processing -> its own user-account. Which tenant
+# database a service reaches is enforced by its login (one per tenant and service).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -27,3 +29,26 @@ spec:
   ingress:
     - ports:
         - {port: 8000, protocol: TCP}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-postgres
+  labels:
+    {{- include "cell.labels" (dict "root" . "component" "postgres") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "cell.selector" (dict "root" . "component" "postgres") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: gateway
+              app.kubernetes.io/part-of: cellarch
+        - podSelector:
+            matchLabels:
+              cellarch.io/role: tenant-service
+      ports:
+        - {port: 5432, protocol: TCP}

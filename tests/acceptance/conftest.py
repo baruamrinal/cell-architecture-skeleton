@@ -1,7 +1,9 @@
 """In-process wiring of the whole platform for acceptance tests.
 
-control plane, router and two cells run as ASGI apps connected through httpx
-ASGI transports: no Docker, no network, no sleeping (the router gets a fake clock).
+control plane, router and the cells run as ASGI apps connected through httpx ASGI
+transports: no Docker, no network, no sleeping (the router gets a fake clock). Each
+cell's tenant stacks run in-process too (tests/fakes.py), started by the same
+onboarding steps `cellctl tenants create` runs.
 """
 
 from __future__ import annotations
@@ -16,6 +18,8 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from cellarch.cli.api import Api
+from cellarch.cli.onboarding import offboard, onboard
 from cellarch.common.headers import INTERNAL_TOKEN_HEADER, TENANT_HEADER
 from cellarch.control_plane.app import ControlPlaneSettings
 from cellarch.control_plane.app import create_app as create_control_plane
@@ -23,6 +27,7 @@ from cellarch.data_plane.cell.app import CellSettings
 from cellarch.data_plane.cell.app import create_app as create_cell
 from cellarch.data_plane.router.app import RouterSettings
 from cellarch.data_plane.router.app import create_app as create_router
+from tests.fakes import MemorySecrets, StackHost, stack_url_template
 
 ADMIN_TOKEN = "test-admin-token"
 ROUTER_TOKEN = "test-router-token"
@@ -35,6 +40,45 @@ SPARE_CELL_IDS = ("cell-4",)
 CONTROL_PLANE_URL = "http://control-plane"
 ROUTE_CACHE_TTL = 5.0
 METRICS_TOKEN = "test-metrics-token"
+CHARTS = Path(__file__).resolve().parents[2] / "charts"
+
+
+def make_cell(
+    tmp_path: Path, cell_id: str, token: str, stacks: StackHost, secrets: MemorySecrets
+) -> Any:
+    """A cell gateway with its own folder (like its volume) and database server."""
+    folder = tmp_path / cell_id
+    return create_cell(
+        CellSettings(
+            cell_id=cell_id,
+            db_path=str(folder / f"{cell_id}.db"),
+            internal_token=token,
+            tenant_db_admin_url=f"sqlite:///{(folder / 'tenants').as_posix()}",
+            tenant_service_url=stack_url_template(cell_id),
+        ),
+        secrets=secrets,
+        http_client=stacks.client(),
+    )
+
+
+class InProcessStacks:
+    """The cell clusters' Helm, as onboarding uses it: tenant stacks start in-process."""
+
+    def __init__(self, platform: Platform) -> None:
+        self.platform = platform
+
+    def cell_ids(self) -> list[str]:
+        return sorted(c for c, switch in self.platform.cells.items() if switch.reachable)
+
+    def helm_upgrade(
+        self, short: str, release: str, chart: Path, values: dict[str, Any], **kw: Any
+    ) -> None:
+        tenant_id = values["tenantId"]
+        secret = self.platform.cell_secrets[short].values[tenant_id]
+        self.platform.stacks.start(short, tenant_id, secret)
+
+    def helm_uninstall(self, short: str, release: str) -> None:
+        self.platform.stacks.stop(short, release.removeprefix("tenant-"))
 
 
 @dataclass
@@ -92,6 +136,8 @@ class Platform:
     clock: FakeClock
     tmp_path: Path
     router_mounts: dict[str, httpx.AsyncBaseTransport]
+    stacks: StackHost
+    cell_secrets: dict[str, MemorySecrets]
 
     def extra_router(self, **settings: Any) -> TestClient:
         """Another router on the same platform, e.g. one of several replicas."""
@@ -117,8 +163,8 @@ class Platform:
 
     def start_cell(self, cell_id: str, token: str) -> None:
         """Start a real cell app in a spare address slot (what `docker compose up` does)."""
-        settings = CellSettings(cell_id, str(self.tmp_path / cell_id / f"{cell_id}.db"), token)
-        self.cells[cell_id].app = create_cell(settings)
+        secrets = self.cell_secrets.setdefault(cell_id, MemorySecrets())
+        self.cells[cell_id].app = make_cell(self.tmp_path, cell_id, token, self.stacks, secrets)
         self.cells[cell_id].reachable = True
 
     def stop_cell(self, cell_id: str) -> None:
@@ -141,12 +187,20 @@ class Platform:
         response: httpx.Response = self.admin.post("/v1/tenants", json=body)
         return response
 
-    def onboard(self, tenant_id: str) -> str:
-        """Create a tenant and return the cell it was placed on."""
-        response = self.create_tenant(tenant_id)
-        assert response.status_code == 201, response.text
-        cell_id: str = response.json()["cell_id"]
+    def onboard(self, tenant_id: str, **fields: Any) -> str:
+        """Onboard a tenant as `cellctl tenants create` does; returns its cell."""
+        body = {"tenant_id": tenant_id, "name": tenant_id.title(), "tier": "standard", **fields}
+        tenant = onboard(
+            self.api(), InProcessStacks(self), CHARTS, body, progress=_quiet, sleep=_quiet
+        )
+        cell_id: str = tenant["cell_id"]
         return cell_id
+
+    def offboard(self, tenant_id: str) -> None:
+        offboard(self.api(), InProcessStacks(self), tenant_id, progress=_quiet)
+
+    def api(self) -> Api:
+        return Api(self.admin, ADMIN_TOKEN)
 
     def as_tenant(self, tenant_id: str, method: str, path: str, **kwargs: Any) -> httpx.Response:
         headers = {TENANT_HEADER: tenant_id, **kwargs.pop("headers", {})}
@@ -154,19 +208,18 @@ class Platform:
         return response
 
 
+def _quiet(*args: object) -> None:
+    pass
+
+
 @pytest.fixture
 def platform(tmp_path: Path) -> Iterator[Platform]:
+    stacks = StackHost()
+    tokens = {**CELL_TOKENS, **UNCONFIGURED_CELL_TOKENS}
+    cell_secrets = {cell_id: MemorySecrets() for cell_id in tokens}
     cells = {
-        cell_id: Switch(
-            create_cell(
-                CellSettings(
-                    cell_id=cell_id,
-                    db_path=str(tmp_path / cell_id / f"{cell_id}.db"),  # own folder, like a volume
-                    internal_token=token,
-                )
-            )
-        )
-        for cell_id, token in {**CELL_TOKENS, **UNCONFIGURED_CELL_TOKENS}.items()
+        cell_id: Switch(make_cell(tmp_path, cell_id, token, stacks, cell_secrets[cell_id]))
+        for cell_id, token in tokens.items()
     }
     for cell_id in SPARE_CELL_IDS:
         cells[cell_id] = Switch(_nothing_running)
@@ -225,4 +278,6 @@ def platform(tmp_path: Path) -> Iterator[Platform]:
             clock=clock,
             tmp_path=tmp_path,
             router_mounts=router_mounts,
+            stacks=stacks,
+            cell_secrets=cell_secrets,
         )

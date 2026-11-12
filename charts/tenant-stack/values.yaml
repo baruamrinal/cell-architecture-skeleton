@@ -1,0 +1,22 @@
+# One tenant's stack. Install as release tenant-<id> in the tenant's cell cluster
+# (`cellctl tenants create` does it). The cell's gateway has already created the
+# tenant's database and the Secret tenant-<id> the services read their settings from.
+
+tenantId: ""                    # required, e.g. acme
+tier: standard                  # standard | premium: sets the resource caps below
+
+image:
+  repository: cellarch          # images are <repository>/<service>:<tag>
+  tag: dev
+  pullPolicy: IfNotPresent
+
+replicas: 1
+
+# Per service, by tier (docs/plan.md §3.4).
+resources:
+  standard:
+    requests: {cpu: 50m, memory: 96Mi}
+    limits: {cpu: 250m, memory: 256Mi}
+  premium:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {cpu: "1", memory: 512Mi}

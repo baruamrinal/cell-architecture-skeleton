@@ -1,0 +1,37 @@
+{{- /* The gateway writes each tenant's stack secret (logins, stack credential) into the
+cell's namespace, where the tenant's containers read it. It may create, replace and
+delete secrets, but never read or list them. Secrets Manager + External Secrets on AWS. */ -}}
+{{- $name := printf "%s-gateway" (include "cell.fullname" .) -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cell.labels" (dict "root" . "component" "gateway") | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cell.labels" (dict "root" . "component" "gateway") | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cell.labels" (dict "root" . "component" "gateway") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}

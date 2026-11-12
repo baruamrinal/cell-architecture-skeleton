@@ -31,7 +31,6 @@ CREATE TABLE IF NOT EXISTS tenants (
     updated_at     TEXT NOT NULL,
     created_by     TEXT NOT NULL DEFAULT 'unknown',
     updated_by     TEXT NOT NULL DEFAULT 'unknown',
-    isolation      TEXT NOT NULL DEFAULT 'pooled',
     -- Rate limit override; NULL means the tier default applies.
     rate_limit_rps   REAL,
     rate_limit_burst INTEGER
@@ -52,15 +51,12 @@ _ADDED_COLUMNS = [
     ("cells", "updated_by", "TEXT NOT NULL DEFAULT 'unknown'"),
     ("tenants", "created_by", "TEXT NOT NULL DEFAULT 'unknown'"),
     ("tenants", "updated_by", "TEXT NOT NULL DEFAULT 'unknown'"),
-    # Tenants created before the isolation tier all live in the cell's shared database.
-    ("tenants", "isolation", "TEXT NOT NULL DEFAULT 'pooled'"),
     ("tenants", "rate_limit_rps", "REAL"),
     ("tenants", "rate_limit_burst", "INTEGER"),
 ]
 
 _CELLS_WITH_LOAD = """
-SELECT c.*, COUNT(t.tenant_id) AS tenant_count,
-       SUM(CASE WHEN t.isolation = 'isolated' THEN 1 ELSE 0 END) AS isolated_tenants
+SELECT c.*, COUNT(t.tenant_id) AS tenant_count
 FROM cells c LEFT JOIN tenants t ON t.cell_id = c.cell_id
 """
 
@@ -183,16 +179,15 @@ class ControlPlaneStore:
         tier: str,
         cell_id: str,
         actor: str = SYSTEM_ACTOR,
-        isolation: str = "pooled",
     ) -> dict[str, Any]:
         now = utcnow()
         try:
             with connect(self._db_path) as conn:
                 conn.execute(
                     "INSERT INTO tenants (tenant_id, name, tier, placement_mode, cell_id, status, "
-                    "created_at, updated_at, created_by, updated_by, isolation) "
-                    "VALUES (?, ?, ?, 'pooled', ?, 'provisioning', ?, ?, ?, ?, ?)",
-                    (tenant_id, name, tier, cell_id, now, now, actor, actor, isolation),
+                    "created_at, updated_at, created_by, updated_by) "
+                    "VALUES (?, ?, ?, 'pooled', ?, 'provisioning', ?, ?, ?, ?)",
+                    (tenant_id, name, tier, cell_id, now, now, actor, actor),
                 )
         except sqlite3.IntegrityError as exc:
             raise DuplicateError(tenant_id) from exc

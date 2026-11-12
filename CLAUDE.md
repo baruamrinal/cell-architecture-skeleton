@@ -6,7 +6,7 @@ Reference implementation of cell-based architecture for a multi-tenant SaaS plat
 
 ## Status
 
-Stages 1 and 2 implemented (core platform, traffic protection); runtime is local Kubernetes (k3d: platform cluster + one cluster per cell). Next: stage 2.5 (per-tenant services) and 2.6 (Kubernetes + Helm, cluster per cell). Work proceeds in the delivery stages in docs/plan.md §13, one stage at a time.
+Stages 1, 2, 2.5 and 2.6 implemented: core platform, traffic protection, per-tenant services (each tenant's own user-account + order-processing containers and database on its cell's Postgres), and the Kubernetes runtime (k3d locally: a platform cluster + one cluster per cell; Helm charts `platform`, `cell`, `tenant-stack`). Next: stage 3 (tenant moves). Work proceeds in the delivery stages in docs/plan.md §13, one stage at a time.
 
 ## Working agreements
 
@@ -39,7 +39,7 @@ If a change can't meet one of these, say so in the PR and record it in the decis
 1. **Control plane vs data plane.** The control plane (`src/cellarch/control_plane/`) is never on the request path. The data plane (`src/cellarch/data_plane/router/`, `src/cellarch/data_plane/cell/`) must keep serving when the control plane is down (cached routes, cells know their own tenants).
 2. **One tenant lives in exactly one cell.** Routing is `tenant_id → cell`. Splitting one tenant across cells (sharding) is out of scope.
 3. **Cells share nothing that can fail together.** Each cell has its own database server **and its own Kubernetes cluster**; the router and control plane run in a separate platform cluster. No cell-to-cell calls. Never put two cells in one cluster, not even as namespaces.
-4. **Tenant isolation.** Every query goes through the tenant-scoped data-access layer, with Postgres row-level security as a second line on AWS. A cell rejects tenants it doesn't host (`421`). Any change touching data access needs a cross-tenant test.
+4. **Tenant isolation.** Each tenant has its own services and its own database on its cell's database server, with a login per service that reaches only that service's schema; queries still filter by `tenant_id` as a second line. A cell rejects tenants it doesn't host (`421`). Any change touching data access needs a cross-tenant test.
 5. **All cells come from one module.** No hand-built or snowflake cells. Shared, dedicated, seasonal and customer-hosted cells differ only in inputs (`cells.yaml`).
 6. **Account-agnostic infrastructure.** Terraform modules take account, region and assume-role as inputs, so a cell can be deployed into a customer's AWS account.
 7. **One Terraform state file per cell.** Infrastructure changes roll out cell by cell, like code.

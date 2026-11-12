@@ -66,6 +66,9 @@ class FakeClusters:
     ) -> None:
         self._record("helm", short, release, chart.name, dict(values), reuse_values)
 
+    def helm_uninstall(self, short: str, release: str) -> None:
+        self._record("uninstall", short, release)
+
     def node_ip(self, short: str) -> str:
         return f"172.20.0.{len(short)}"
 
@@ -110,7 +113,59 @@ def up(root: Path, clusters: FakeClusters, run: FakeRunner | None = None, **kw: 
         run=run or FakeRunner(),
         clusters=clusters,
         port_in_use=kw.get("port_in_use", lambda port: False),
+        answers=kw.get("answers", lambda url: True),
+        sleep=kw.get("sleep", lambda seconds: None),
     )
+
+
+class TestWaitsForThePlatform:
+    """helm --wait doesn't cover k3s's load balancer pods: wait until the API answers."""
+
+    def test_status_runs_once_the_control_plane_answers(self, root: Path) -> None:
+        make_venv(root)
+        replies = iter([False, False, True])
+        probed: list[str] = []
+
+        def answers(url: str) -> bool:
+            probed.append(url)
+            return next(replies)
+
+        run = FakeRunner()
+        assert up(root, FakeClusters(), run, answers=answers) == 0
+        assert probed == ["http://127.0.0.1:8000/healthz"] * 3
+        assert "status" in " ".join(run.calls[-1][0])
+
+    def test_gives_up_with_a_clear_error(
+        self, root: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        make_venv(root)
+        waited: list[float] = []
+        assert up(root, FakeClusters(), answers=lambda url: False, sleep=waited.append) == 1
+        assert sum(waited) >= 120
+        assert "control plane did not answer" in capsys.readouterr().err
+
+
+def test_answers_probes_a_real_http_server() -> None:
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Ok(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200 if self.path == "/healthz" else 503)
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Ok)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        assert dev.answers(f"{base}/healthz")
+        assert not dev.answers(f"{base}/other")
+    finally:
+        server.shutdown()
+    assert not dev.answers("http://127.0.0.1:1/healthz")
 
 
 class TestParseEnv:
@@ -193,7 +248,15 @@ class TestUp:
             "platform",
             ("cellarch/router:dev", "cellarch/control-plane:dev"),
         ) in clusters.calls
-        assert ("import", "cell-1", ("cellarch/cell-gateway:dev",)) in clusters.calls
+        assert (
+            "import",
+            "cell-1",
+            (
+                "cellarch/cell-gateway:dev",
+                "cellarch/user-account:dev",
+                "cellarch/order-processing:dev",
+            ),
+        ) in clusters.calls
 
         cell = clusters.helm("cell-1")
         assert cell[2:4] == ("cellarch", "cell")
@@ -238,14 +301,14 @@ class TestUp:
         make_venv(root)
         (root / ".env").write_text(
             "RATE_LIMIT_STANDARD=5:10\nDEFAULT_CELL_CAPACITY=8\nROUTER_REPLICAS=3\n"
-            "MAX_CONCURRENT_REQUESTS=40\nDEFAULT_TENANT_ISOLATION=pooled\n"
+            "MAX_CONCURRENT_REQUESTS=40\n"
         )
         clusters = FakeClusters()
         up(root, clusters)
         platform = clusters.helm("platform")[4]
         assert platform["controlPlane"]["rateLimits"] == {"standard": "5:10"}
         assert platform["controlPlane"]["defaultCellCapacity"] == 8
-        assert platform["controlPlane"]["defaultTenantIsolation"] == "pooled"
+        assert "defaultTenantIsolation" not in platform["controlPlane"]
         assert platform["router"]["replicas"] == 3
         assert clusters.helm("cell-1")[4]["gateway"] == {"maxConcurrentRequests": 40}
 

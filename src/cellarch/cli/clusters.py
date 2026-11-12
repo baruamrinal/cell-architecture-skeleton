@@ -94,6 +94,7 @@ class ClusterToolkit(Protocol):
         *,
         reuse_values: bool = False,
     ) -> None: ...
+    def helm_uninstall(self, short: str, release: str) -> None: ...
     def set_cell_dns(self, entries: Mapping[str, str]) -> bool: ...
 
 
@@ -197,6 +198,22 @@ class LocalClusters:
             self._exec(cmd)
         finally:
             Path(path).unlink(missing_ok=True)
+
+    def helm_uninstall(self, short: str, release: str) -> None:
+        """Remove a release and wait for its pods to go. Missing releases are fine."""
+        self._exec(
+            [
+                "helm",
+                "uninstall",
+                release,
+                "--kube-context",
+                context(short),
+                "--ignore-not-found",
+                "--wait",
+                "--timeout",
+                "300s",
+            ]  # fmt: skip
+        )
 
     # --- cell DNS in the platform cluster ------------------------------------------------
 

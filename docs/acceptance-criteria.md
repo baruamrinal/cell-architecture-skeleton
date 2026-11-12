@@ -48,15 +48,6 @@ What each delivery stage must do, in plain language. The precise, executable ver
 | A25 | admin calls that name the caller (`X-Actor`, sent by `cellctl`) | a cell or tenant is created, then changed | `created_by` / `updated_by` record `admin:<name>` (or `admin` without a name) and `updated_at` moves on |
 | A26 | the admin API | the caller name has spaces, symbols, non-ASCII characters or is over 64 characters | the request is rejected with `400 invalid_actor` |
 
-### Tenant data isolation tier
-
-| ID | Given | When | Then |
-|---|---|---|---|
-| A27 | a tenant onboarded with `isolation: isolated` | it stores data | the data is in the tenant's own database on its cell, not the cell's shared database |
-| A28 | a pooled and an isolated tenant on the same cell | each lists or reads the other's items | neither can see the other's data |
-| A29 | an isolated tenant with data | it is removed from its cell | its database is deleted entirely |
-| A30 | tenant onboarding | no isolation is given, `pooled` is given, or an unknown value is given | the default is `isolated`, `pooled` is honoured, an unknown value is rejected (`422`); status counts isolated tenants per cell and in total |
-
 ## Stage 2: traffic protection
 
 ### Rate limits
@@ -103,3 +94,17 @@ What each delivery stage must do, in plain language. The precise, executable ver
 A42–A49 run on the SQLite stand-in and, when `POSTGRES_URL` points at a Postgres server, on PostgreSQL (the production engine).
 
 Stage 1 also has a demo acceptance check: `scripts/demo.py` runs end-to-end against the in-process platform (`tests/acceptance/test_demo.py`) and against the real compose stack in CI (`compose-smoke`).
+
+### A tenant's own stack and database in its cell
+
+Every tenant gets its own `user-account` and `order-processing` containers and its own database on the cell's database server. This replaces the sample `items` API and the pooled/isolated tier (A27–A30, retired).
+
+| ID | Given | When | Then |
+|---|---|---|---|
+| A50 | a cell with room | a tenant is onboarded (`cellctl tenants create`) | the control plane places it (`provisioning`); the cell creates the tenant's database, a login per service and the stack's secret; the tenant's stack is installed in the cell's cluster; the tenant becomes `active` and its users and orders are served through the router |
+| A51 | a tenant whose stack is not running yet | it is activated, or it sends requests | activation fails with `409 tenant_stack_not_ready` and the tenant stays `provisioning`; its requests get `503 tenant_unavailable` from the router (and `503 tenant_not_ready` from the cell itself) |
+| A52 | two tenants on the same cell | each creates users and orders through the router | each is served by its own stack and database: neither can list, read or order for the other's users |
+| A53 | two tenants on the same cell, one tenant's stack down | both send requests | only that tenant gets `503 tenant_stack_unavailable` (with `Retry-After`); the other is unaffected |
+| A54 | an onboarded tenant with data | it is deleted (`cellctl tenants delete`) | its stack is uninstalled, its database, logins and secret are dropped, and it is gone from the control plane and the cell (the router answers `404 unknown_tenant`) |
+| A55 | onboarding where any step fails (no capacity, the cell refuses, the stack doesn't start) | `cellctl tenants create` runs | every step done so far is undone: no tenant record, database or stack is left behind |
+| A56 | a tenant's database on the cell's Postgres server | each service logs in with its own login | it can use only its own schema in its own tenant's database: not the other service's schema, and not another tenant's database (runs when `POSTGRES_URL` is set) |

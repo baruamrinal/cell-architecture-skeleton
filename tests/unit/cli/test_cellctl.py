@@ -13,6 +13,7 @@ from cellarch.common.headers import INTERNAL_TOKEN_HEADER
 from cellarch.control_plane.app import ControlPlaneSettings, create_app
 
 from ..control_plane.test_cell_lifecycle_unit import fake_cells
+from .test_onboarding import RecordingClusters
 
 ADMIN = "admin-t"
 
@@ -36,8 +37,9 @@ def control_plane(tmp_path: Path) -> Iterator[TestClient]:
         yield client
 
 
-def run(client: TestClient, *args: str, token: str = ADMIN) -> int:
-    return main([*args], client=client, token=token)
+def run(client: TestClient, *args: str, token: str = ADMIN, clusters: object | None = None) -> int:
+    toolkit = clusters if clusters is not None else RecordingClusters()
+    return main([*args], client=client, token=token, clusters=toolkit)  # type: ignore[arg-type]
 
 
 def test_register_and_list_cells(
@@ -86,7 +88,11 @@ def test_create_get_and_list_tenants(
         run(control_plane, "tenants", "create", "acme", "--name", "Acme", "--tier", "premium") == 0
     )
     created = json.loads(capsys.readouterr().out)
-    assert (created["cell_id"], created["tier"]) == ("cell-1", "premium")
+    assert (created["cell_id"], created["tier"], created["status"]) == (
+        "cell-1",
+        "premium",
+        "active",
+    )
 
     assert run(control_plane, "tenants", "get", "acme") == 0
     assert json.loads(capsys.readouterr().out)["tenant_id"] == "acme"
@@ -97,7 +103,6 @@ def test_create_get_and_list_tenants(
         "TENANT",
         "NAME",
         "TIER",
-        "ISOLATION",
         "CELL",
         "STATUS",
         "CREATED",
@@ -107,22 +112,39 @@ def test_create_get_and_list_tenants(
         "acme",
         "Acme",
         "premium",
-        "isolated",
         "cell-1",
         "active",
         "admin:tester",
     ]
 
 
-def test_create_tenant_with_explicit_isolation(
+def test_create_installs_the_stack_and_delete_removes_it(
     control_plane: TestClient, capsys: pytest.CaptureFixture[str]
 ) -> None:
     run(control_plane, "cells", "register", "cell-1", "http://cell-1")
+    clusters = RecordingClusters()
+    assert run(control_plane, "tenants", "create", "globex", clusters=clusters) == 0
+    assert clusters.calls[0][:4] == ("install", "cell-1", "tenant-globex", "tenant-stack")
     capsys.readouterr()
-    assert run(control_plane, "tenants", "create", "globex", "--isolation", "pooled") == 0
-    assert json.loads(capsys.readouterr().out)["isolation"] == "pooled"
-    with pytest.raises(SystemExit):
-        run(control_plane, "tenants", "create", "initech", "--isolation", "silo")
+    assert run(control_plane, "tenants", "delete", "globex", clusters=clusters) == 0
+    assert clusters.calls[-1] == ("uninstall", "cell-1", "tenant-globex")
+    captured = capsys.readouterr()
+    assert captured.out == "" and "deleted" in captured.err
+    assert run(control_plane, "tenants", "get", "globex") == 1
+
+
+def test_failed_onboarding_is_reported_and_undone(
+    control_plane: TestClient, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run(control_plane, "cells", "register", "cell-1", "http://cell-1")
+    assert (
+        run(
+            control_plane, "tenants", "create", "globex", clusters=RecordingClusters(fail="install")
+        )
+        == 1
+    )
+    assert "helm install failed" in capsys.readouterr().err
+    assert run(control_plane, "tenants", "get", "globex") == 1
 
 
 def test_tenant_name_defaults_to_id(
@@ -204,7 +226,7 @@ def test_reads_url_and_token_from_environment(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_make_client_targets_the_given_url() -> None:
-    from cellarch.cli.cellctl import make_client
+    from cellarch.cli.api import make_client
 
     with make_client("http://cp.example:8000") as client:
         assert str(client.base_url) == "http://cp.example:8000"

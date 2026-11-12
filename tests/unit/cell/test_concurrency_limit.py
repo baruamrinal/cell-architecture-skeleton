@@ -67,6 +67,7 @@ def test_max_must_be_positive() -> None:
 
 def test_setting_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CELL_ID", "cell-7")
+    monkeypatch.setenv("TENANT_DB_ADMIN_URL", "sqlite:///./data/tenants")
     monkeypatch.setenv("CELL_INTERNAL_TOKEN", "t")
     monkeypatch.setenv("MAX_CONCURRENT_REQUESTS", "25")
     assert CellSettings.from_env().max_concurrent_requests == 25

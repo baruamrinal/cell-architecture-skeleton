@@ -6,7 +6,7 @@ from .conftest import ROUTE_CACHE_TTL, Platform
 
 
 def burst(platform: Platform, tenant_id: str, count: int) -> list[int]:
-    return [platform.as_tenant(tenant_id, "GET", "/v1/items").status_code for _ in range(count)]
+    return [platform.as_tenant(tenant_id, "GET", "/v1/users").status_code for _ in range(count)]
 
 
 def test_a31_over_the_limit_gets_429_and_never_reaches_the_cell(platform: Platform) -> None:
@@ -16,7 +16,7 @@ def test_a31_over_the_limit_gets_429_and_never_reaches_the_cell(platform: Platfo
     assert burst(platform, "acme", 2) == [200, 200]
     seen_by_cell = len(platform.cells["cell-1"].requests)
 
-    throttled = platform.as_tenant("acme", "GET", "/v1/items")
+    throttled = platform.as_tenant("acme", "GET", "/v1/users")
 
     assert (throttled.status_code, throttled.json()["error"]) == (429, "rate_limited")
     assert int(throttled.headers["Retry-After"]) >= 1
@@ -45,8 +45,10 @@ def test_a33_bursts_are_allowed_and_tokens_refill_over_time(platform: Platform) 
 
 def test_a34_tier_defaults_overrides_and_clearing(platform: Platform) -> None:
     platform.register_cell("cell-1", capacity=10)
-    standard = platform.create_tenant("acme").json()
-    premium = platform.create_tenant("globex", tier="premium").json()
+    platform.onboard("acme")
+    platform.onboard("globex", tier="premium")
+    standard = platform.admin.get("/v1/tenants/acme").json()
+    premium = platform.admin.get("/v1/tenants/globex").json()
 
     overridden = platform.set_limit("acme", rps=2, burst=3)
     cleared = platform.admin.delete("/v1/tenants/acme/rate-limit")
@@ -83,7 +85,7 @@ def test_a36_each_router_replica_enforces_its_share(platform: Platform) -> None:
 
     with platform.extra_router(router_replicas=2) as replica:
         codes = [
-            replica.get("/v1/items", headers={"X-Tenant-ID": "acme"}).status_code for _ in range(3)
+            replica.get("/v1/users", headers={"X-Tenant-ID": "acme"}).status_code for _ in range(3)
         ]
 
     assert codes == [200, 200, 429]
@@ -94,8 +96,8 @@ def test_a37_responses_carry_rate_limit_headers(platform: Platform) -> None:
     platform.onboard("acme")
     platform.set_limit("acme", rps=1, burst=5)
 
-    first = platform.as_tenant("acme", "GET", "/v1/items")
-    second = platform.as_tenant("acme", "GET", "/v1/items")
+    first = platform.as_tenant("acme", "GET", "/v1/users")
+    second = platform.as_tenant("acme", "GET", "/v1/users")
 
     assert first.headers["X-RateLimit-Limit"] == "5"
     assert first.headers["X-RateLimit-Remaining"] == "4"

@@ -31,7 +31,7 @@ def test_a16_a_running_cell_can_be_registered_with_its_credential(platform: Plat
 
     assert response.status_code == 201
     assert platform.onboard("acme") == "cell-3"
-    served = platform.as_tenant("acme", "GET", "/v1/items")
+    served = platform.as_tenant("acme", "GET", "/v1/users")
     assert (served.status_code, served.headers[CELL_HEADER]) == (200, "cell-3")
 
 
@@ -121,7 +121,6 @@ def test_a21_status_summarises_capacity_and_warns_before_it_runs_out(platform: P
         "tenants": 3,
         "capacity": 4,
         "free_slots": 1,
-        "isolated_tenants": 3,  # tenants are isolated by default
     }
     assert past_target["target_utilization"] == 0.75
     assert [w["code"] for w in past_target["warnings"]] == ["capacity_low"]
@@ -158,6 +157,9 @@ class FakeClusters:
         self.calls.append(("helm", short))
         if self.gateway_comes_up:
             self.platform.start_cell(values["cellId"], values["secrets"]["internalToken"])
+
+    def helm_uninstall(self, short: str, release: str) -> None:
+        self.calls.append(("uninstall", short, release))
 
     def ensure_network(self) -> None:
         pass
@@ -211,7 +213,7 @@ def test_a22_cellctl_deploy_creates_a_cell_cluster_and_registers_it_in_one_step(
     assert cell["url"] == "http://cell-4.cellarch.internal:8000"
     assert [c[0] for c in clusters.calls] == ["cluster", "import", "helm", "dns"]
     assert platform.onboard("acme") == "cell-4"
-    assert platform.as_tenant("acme", "GET", "/v1/items").headers[CELL_HEADER] == "cell-4"
+    assert platform.as_tenant("acme", "GET", "/v1/users").headers[CELL_HEADER] == "cell-4"
 
 
 def test_a23_cellctl_deploy_cleans_up_when_the_cell_does_not_come_up(
