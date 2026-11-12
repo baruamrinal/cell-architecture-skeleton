@@ -215,6 +215,7 @@ cellctl tenants get acme                                # "rate_limit": {"rps", 
 - **When changes apply:** within 5 seconds, when the router refreshes its cached route. Limits keep working while the control plane is down.
 - **Tier defaults:** change them with `RATE_LIMIT_STANDARD` / `RATE_LIMIT_PREMIUM` in `.env`.
 - **Several routers:** set `ROUTER_REPLICAS`, and each router enforces its share (limit ÷ replicas).
+- **Shared limiter (optional):** set `RATE_LIMIT_BACKEND=redis` and `COMPOSE_PROFILES=redis` in `.env`, then `. .\make up`. All routers then share **one** bucket per tenant in Redis, so the full limit is exact and `ROUTER_REPLICAS` no longer splits it. It **fails open**: if Redis is down, each router falls back to its own limits, and Redis is retried every few seconds. Traffic never stops because of Redis.
 
 Moving tenants between cells (stage 3) and seasonal schedules (stage 4) will be added here.
 

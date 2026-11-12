@@ -25,9 +25,7 @@ def test_a40_redis_down_falls_back_to_in_memory_limits(platform: Platform) -> No
     platform.onboard("acme")
     platform.set_limit("acme", rps=0.001, burst=2)
 
-    with platform.extra_router(
-        rate_limit_backend="redis", redis_url=UNREACHABLE_REDIS
-    ) as router:
+    with platform.extra_router(rate_limit_backend="redis", redis_url=UNREACHABLE_REDIS) as router:
         assert codes(router, "acme", 3) == [200, 200, 429]
 
 

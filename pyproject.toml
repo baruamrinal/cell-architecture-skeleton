@@ -14,6 +14,7 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "httpx>=0.27",
     "pydantic>=2.8",
+    "redis>=5",  # shared rate limiter (RATE_LIMIT_BACKEND=redis)
 ]
 
 [project.scripts]
