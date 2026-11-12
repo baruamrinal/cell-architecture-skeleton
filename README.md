@@ -39,13 +39,7 @@ docker compose -f deploy/docker-compose.yml up --build -d --wait
 python scripts/demo.py                              # onboard tenants, route, check isolation
 ```
 
-**Admin CLI:** the control plane's admin API is on `localhost:8000`, with interactive API docs at `/docs`.
-```powershell
-$env:CELLCTL_TOKEN = "dev-admin-token"   # local development default
-cellctl cells list
-cellctl tenants create acme --name "Acme" --tier premium
-cellctl cells set-status cell-1 draining
-```
+**Managing tenants and cells:** use the `cellctl` admin CLI; see [Admin CLI](#admin-cli-cellctl) below. The control plane's admin API is on `localhost:8000`, with API docs at `/docs`.
 
 **Calling the tenant API through the router** (`localhost:8080`):
 ```powershell
@@ -54,6 +48,82 @@ curl -H "X-Tenant-ID: acme" http://localhost:8080/v1/items
 ```
 
 Stop and remove everything with `docker compose -f deploy/docker-compose.yml down -v`.
+
+## Admin CLI (`cellctl`)
+
+`cellctl` manages tenants and cells through the control plane's admin API. It's installed into the virtual environment by `pip install -e ".[dev]"`.
+
+### Setup
+
+```powershell
+.venv\Scripts\Activate.ps1                 # or call it by path: .venv\Scripts\cellctl
+$env:CELLCTL_TOKEN = "dev-admin-token"     # admin credential (local development default)
+$env:CELLCTL_URL   = "http://localhost:8000"   # optional; this is the default
+```
+
+Both settings can also be passed per command: `cellctl --url http://localhost:8000 --token <token> tenants list`.
+
+If `cellctl` is "not recognized", the virtual environment isn't active in that terminal. If activation fails with "running scripts is disabled", run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
+
+### Tenant commands
+
+| Command | What it does |
+|---|---|
+| `cellctl tenants create <tenant-id> [--name NAME] [--tier standard\|premium]` | Onboard a tenant: the control plane picks a cell (fill-first), sets the tenant up there and returns the record. `--name` defaults to the tenant ID; `--tier` defaults to `standard`. |
+| `cellctl tenants list` | List all tenants with their tier, cell and status. |
+| `cellctl tenants get <tenant-id>` | Show one tenant's full record as JSON. |
+
+Tenant IDs are 2–63 characters: lowercase letters, digits and hyphens, starting with a letter or digit (for example `acme`, `acme-eu`, `t-42`).
+
+**Examples**
+```powershell
+cellctl tenants create acme --name "Acme Corp" --tier premium
+cellctl tenants create globex
+cellctl tenants list
+cellctl tenants get acme
+```
+
+```text
+TENANT  NAME       TIER      CELL    STATUS
+acme    Acme Corp  premium   cell-1  active
+globex  globex     standard  cell-1  active
+```
+
+**Possible errors when creating a tenant**
+
+| Error | Meaning |
+|---|---|
+| `tenant_exists` | A tenant with that ID already exists. |
+| `no_capacity` | Every shared, active cell is full. Register a cell or raise a cell's capacity. |
+| `provisioning_failed` | The chosen cell couldn't set the tenant up (for example, it's down). Nothing is left behind; retry once the cell is healthy. |
+| `validation_error` | The tenant ID or tier isn't valid. |
+
+### Cell commands
+
+Tenants are placed on cells, so these are often needed alongside the tenant commands.
+
+| Command | What it does |
+|---|---|
+| `cellctl cells list` | List cells with type, status, tenant count, capacity and utilization. |
+| `cellctl cells get <cell-id>` | Show one cell as JSON. |
+| `cellctl cells register <cell-id> <url> [--capacity N] [--type shared\|dedicated] [--size small\|medium\|large] [--wave N]` | Register a cell. Its credential must already be configured in the control plane (`CELL_CREDENTIALS`), otherwise this fails with `missing_cell_credential`. |
+| `cellctl cells set-status <cell-id> active\|draining\|disabled` | `draining` or `disabled` stops new tenants from being placed on the cell; existing tenants keep working. |
+
+```powershell
+cellctl cells list
+cellctl cells set-status cell-1 draining   # new tenants now go elsewhere
+cellctl cells set-status cell-1 active
+```
+
+### Output and exit codes
+
+- **Output:** lists print as tables; single records print as JSON.
+- **Exit codes:**
+  - `0` on success;
+  - `1` when the control plane returns an error or can't be reached (the message goes to stderr);
+  - `2` for usage errors, such as a missing token or an invalid option.
+
+Moving tenants between cells and seasonal schedules are added to `cellctl` in later stages (3 and 4).
 
 ## Development
 
