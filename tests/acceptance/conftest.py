@@ -26,7 +26,12 @@ from cellarch.data_plane.router.app import create_app as create_router
 
 ADMIN_TOKEN = "test-admin-token"
 ROUTER_TOKEN = "test-router-token"
+# Credentials the control plane is configured with (environment).
 CELL_TOKENS = {"cell-1": "test-cell-1-token", "cell-2": "test-cell-2-token"}
+# Running cells the control plane has no credential for yet (registered via the API).
+UNCONFIGURED_CELL_TOKENS = {"cell-3": "test-cell-3-token"}
+# Address slots with nothing running; a fake Docker runner "starts" cells here.
+SPARE_CELL_IDS = ("cell-4",)
 CONTROL_PLANE_URL = "http://control-plane"
 ROUTE_CACHE_TTL = 5.0
 
@@ -60,6 +65,10 @@ class Switch:
         await self.app(scope, receive, send)
 
 
+async def _nothing_running(scope: Scope, receive: Receive, send: Send) -> None:
+    raise httpx.ConnectError("nothing is running at this address")
+
+
 class FakeClock:
     def __init__(self) -> None:
         self.now = 1_000.0
@@ -80,6 +89,17 @@ class Platform:
     cells: dict[str, Switch]
     cell_clients: dict[str, TestClient]
     clock: FakeClock
+    tmp_path: Path
+
+    def start_cell(self, cell_id: str, token: str) -> None:
+        """Start a real cell app in a spare address slot (what `docker compose up` does)."""
+        settings = CellSettings(cell_id, str(self.tmp_path / f"{cell_id}.db"), token)
+        self.cells[cell_id].app = create_cell(settings)
+        self.cells[cell_id].reachable = True
+
+    def stop_cell(self, cell_id: str) -> None:
+        self.cells[cell_id].app = _nothing_running
+        self.cells[cell_id].reachable = False
 
     def register_cell(self, cell_id: str, **fields: Any) -> dict[str, Any]:
         body = {"cell_id": cell_id, "url": f"http://{cell_id}", "capacity": 4, **fields}
@@ -122,8 +142,11 @@ def platform(tmp_path: Path) -> Iterator[Platform]:
                 )
             )
         )
-        for cell_id, token in CELL_TOKENS.items()
+        for cell_id, token in {**CELL_TOKENS, **UNCONFIGURED_CELL_TOKENS}.items()
     }
+    for cell_id in SPARE_CELL_IDS:
+        cells[cell_id] = Switch(_nothing_running)
+        cells[cell_id].reachable = False
     cell_mounts: dict[str, httpx.AsyncBaseTransport] = {
         f"http://{cell_id}": httpx.ASGITransport(app=app) for cell_id, app in cells.items()
     }
@@ -169,4 +192,5 @@ def platform(tmp_path: Path) -> Iterator[Platform]:
                 for cell_id, app in cells.items()
             },
             clock=clock,
+            tmp_path=tmp_path,
         )
