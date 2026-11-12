@@ -26,6 +26,8 @@ dev = [
     "pytest-cov>=5",
     "ruff>=0.6",
     "mypy>=1.11",
+    "pyyaml>=6",  # Helm chart tests parse rendered manifests
+    "types-PyYAML>=6",
 ]
 
 [tool.setuptools.packages.find]
