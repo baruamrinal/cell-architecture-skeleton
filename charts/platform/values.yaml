@@ -1,0 +1,50 @@
+# Platform cluster: router (the only public entry point) and control plane.
+
+image:
+  repository: cellarch          # images are <repository>/<component>:<tag>
+  tag: dev
+  pullPolicy: IfNotPresent
+
+# Required. Locally `make up` fills these from .env; in production External Secrets
+# provides them from Secrets Manager (set secrets.create=false and existingSecret).
+secrets:
+  create: true
+  existingSecret: ""
+  adminToken: ""
+  routerToken: ""
+  metricsToken: ""
+  cellCredentials: {}           # cell-id: token, for seeded cells
+
+router:
+  replicas: 1                   # also ROUTER_REPLICAS: each replica enforces limit / replicas
+  routeCacheTtlSeconds: 5
+  service:
+    type: ClusterIP             # LoadBalancer locally (k3d maps it to localhost:8080)
+    port: 8000
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+
+controlPlane:
+  seedCells: {}                 # cell-id: gateway URL, registered at startup
+  defaultCellCapacity: 4
+  targetUtilization: 0.75
+  rateLimits:
+    standard: "50:100"
+    premium: "500:1000"
+  service:
+    type: ClusterIP
+    port: 8000
+  persistence:
+    size: 1Gi
+    storageClass: ""            # cluster default (local-path on k3d)
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+
+redis:
+  enabled: false                # shared rate limiter; routers fail open without it
+  image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
+  resources:
+    requests: {cpu: 25m, memory: 32Mi}
+    limits: {cpu: 250m, memory: 128Mi}

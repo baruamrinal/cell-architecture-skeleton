@@ -5,6 +5,7 @@ Skipped when Helm isn't installed (CI installs it with the k3d runtime).
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -24,12 +25,12 @@ class RenderError(Exception):
 
 
 def render(chart: str, values: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """Render ``charts/<chart>`` with ``--set-json``-style values; returns the objects."""
+    """Render ``charts/<chart>`` with the given values (passed as --set-json); returns objects."""
     if HELM is None:  # pragma: no cover - guarded by the skip marker
         pytest.skip("helm is not installed")
     args = [HELM, "template", "test", str(CHARTS / chart), "--namespace", "default"]
     for key, value in _flatten(values or {}).items():
-        args += ["--set-json", f"{key}={yaml.safe_dump(value, default_flow_style=True).strip()}"]
+        args += ["--set-json", f"{key}={json.dumps(value)}"]
     result = subprocess.run(args, capture_output=True, text=True, check=False)  # noqa: S603
     if result.returncode != 0:
         raise RenderError(result.stderr)
@@ -40,7 +41,7 @@ def lint(chart: str, values: dict[str, Any]) -> subprocess.CompletedProcess[str]
     assert HELM is not None
     args = [HELM, "lint", str(CHARTS / chart), "--strict"]
     for key, value in _flatten(values).items():
-        args += ["--set-json", f"{key}={yaml.safe_dump(value, default_flow_style=True).strip()}"]
+        args += ["--set-json", f"{key}={json.dumps(value)}"]
     return subprocess.run(args, capture_output=True, text=True, check=False)  # noqa: S603
 
 

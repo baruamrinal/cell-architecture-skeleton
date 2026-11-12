@@ -1,0 +1,98 @@
+{{- $name := printf "%s-control-plane" (include "platform.fullname" .) -}}
+{{- $seeds := list }}
+{{- range $cell, $url := .Values.controlPlane.seedCells }}
+{{- $seeds = append $seeds (printf "%s=%s" $cell $url) }}
+{{- end }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "platform.labels" (dict "root" . "component" "control-plane") | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.controlPlane.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.controlPlane.persistence.size }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "platform.labels" (dict "root" . "component" "control-plane") | nindent 4 }}
+spec:
+  replicas: 1                      # single writer of its database (Aurora in production)
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "platform.selector" (dict "root" . "component" "control-plane") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "platform.labels" (dict "root" . "component" "control-plane") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 10001
+      containers:
+        - name: control-plane
+          image: {{ include "platform.image" (dict "root" . "component" "control-plane") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "platform.containerSecurity" (dict "uid" 10001) | nindent 10 }}
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: CONTROL_PLANE_DB_PATH
+              value: /data/control-plane.db
+            {{- include "platform.secretEnv" (dict "root" . "name" "CONTROL_PLANE_ADMIN_TOKEN" "key" "admin-token") | nindent 12 }}
+            {{- include "platform.secretEnv" (dict "root" . "name" "CONTROL_PLANE_ROUTER_TOKEN" "key" "router-token") | nindent 12 }}
+            {{- include "platform.secretEnv" (dict "root" . "name" "CELL_CREDENTIALS" "key" "cell-credentials") | nindent 12 }}
+            - name: SEED_CELLS
+              value: {{ join "," $seeds | quote }}
+            - name: DEFAULT_CELL_CAPACITY
+              value: {{ .Values.controlPlane.defaultCellCapacity | quote }}
+            - name: TARGET_UTILIZATION
+              value: {{ .Values.controlPlane.targetUtilization | quote }}
+            - name: RATE_LIMIT_STANDARD
+              value: {{ .Values.controlPlane.rateLimits.standard | quote }}
+            - name: RATE_LIMIT_PREMIUM
+              value: {{ .Values.controlPlane.rateLimits.premium | quote }}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.controlPlane.resources | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ $name }}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "platform.labels" (dict "root" . "component" "control-plane") | nindent 4 }}
+spec:
+  type: {{ .Values.controlPlane.service.type }}
+  selector:
+    {{- include "platform.selector" (dict "root" . "component" "control-plane") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.controlPlane.service.port }}
+      targetPort: http
+      protocol: TCP

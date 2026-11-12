@@ -284,6 +284,25 @@ Each cell handles at most `MAX_CONCURRENT_REQUESTS` requests at once (default 10
   - `1` when the control plane or Docker returns an error, or can't be reached;
   - `2` for usage errors, such as a missing token, an invalid option or a missing compose file.
 
+## Images and Helm charts
+
+Each component has **its own image**, built from one multi-stage Dockerfile. Each image contains only that component's code:
+```powershell
+docker build --target router -t cellarch/router:dev .   # also: control-plane, cell-gateway, user-account, order-processing
+```
+
+Helm charts for the Kubernetes runtime (stage 2.6, one cluster per cell):
+
+| Chart | Installed into | Contains |
+|---|---|---|
+| `charts/platform` | the platform cluster | router, control plane, optional Redis |
+| `charts/cell` | **each cell's own cluster** | the cell gateway (the cell's database server and tenant stacks join it in stage 2.5) |
+
+- **Hardened by default:** non-root, read-only filesystem, all capabilities dropped, probes and resource limits, tokens only from Kubernetes secrets.
+- **Network policies:** deny all ingress, then allow only what each component needs.
+
+The charts are tested with `pytest tests/charts`, which needs `helm` installed. The local k3d runtime that uses them comes next. Until then, `make up` still runs Docker Compose.
+
 ## Development
 
 The project is built **test-first** (TDD, [docs/plan.md §14](docs/plan.md)). The whole platform runs in-process for tests, with no Docker needed.
@@ -315,8 +334,11 @@ tests/unit/                unit tests per component
 scripts/demo.py            end-to-end walkthrough (also the compose smoke test)
 scripts/dev.py             local tasks behind make.ps1 (Windows) and Makefile (macOS/Linux)
 scripts/ci/pr_gate.py      PR policy gate
-deploy/docker-compose.yml  local platform
-Dockerfile                 one image for every component
+charts/platform/           Helm chart: router + control plane (platform cluster)
+charts/cell/               Helm chart: one cell's gateway (the cell's own cluster)
+tests/charts/              chart tests (helm template + lint)
+deploy/docker-compose.yml  local platform (until the k3d runtime replaces it)
+Dockerfile                 one image per component (multi-stage targets)
 ```
 
 ## License

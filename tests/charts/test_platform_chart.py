@@ -91,7 +91,9 @@ def test_control_plane_settings_and_storage() -> None:
 def test_redis_is_opt_in() -> None:
     assert not [o for o in render("platform", REQUIRED) if "redis" in o["metadata"]["name"]]
     objects = render("platform", {**REQUIRED, "redis": {"enabled": True}})
-    router_env = env(find(objects, "Deployment", "router")["spec"]["template"]["spec"]["containers"][0])
+    router_env = env(
+        find(objects, "Deployment", "router")["spec"]["template"]["spec"]["containers"][0]
+    )
     assert router_env["RATE_LIMIT_BACKEND"] == "redis"
     assert router_env["REDIS_URL"] == "redis://test-platform-redis:6379/0"
     assert find(objects, "Service", "redis")
