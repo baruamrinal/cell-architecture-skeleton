@@ -18,7 +18,8 @@ Planning complete. No application code yet. Work proceeds in the delivery stages
   - This applies to Terraform too (`terraform test`, Checkov policy checks).
 - **Cost-effective by default.** Prefer options with no fixed cost: scale to zero, nothing extra per cell, shared non-request-path services. Call out the cost impact of any new infrastructure.
 - **Record decisions.** New or changed decisions go in the decisions log (docs/plan.md §16).
-- **Git:** never commit directly to `main`. Use a branch per change (`feat/…`, `fix/…`, `docs/…`, `infra/…`) and open a PR. Commit or push only when asked.
+- **Git:** never commit directly to `main`. Use a branch per change (`feat/…`, `fix/…`, `docs/…`, `infra/…`, `ci/…`) and open a PR. Commit or push only when asked.
+- **PRs:** titles follow conventional commits (`feat: …`, `fix(router): …`), because squash merge makes the title the commit message. `github-actions[bot]` approves via the policy gate (docs/plan.md §9.1) when CI is green, `src/` changes include `tests/` changes, and no protected paths (`.github/**`, `scripts/ci/**`) are touched.
 
 ## Architecture invariants (do not break)
 

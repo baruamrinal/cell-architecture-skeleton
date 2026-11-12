@@ -307,6 +307,23 @@ infra/
 - Login: GitHub OIDC → IAM roles per environment. No long-lived keys.
 - Database changes must stay compatible with the previous app version (expand/contract), so any cell can be rolled back.
 
+### 9.1 PR approval: `github-actions[bot]` policy gate
+
+PRs to `main` need one approval, given by `github-actions[bot]` through `pr-gate.yml` when all rules pass. It is a **policy gate, not a code review**: quality rests on the tests, coverage gate, scans and the TDD rule.
+
+| # | Rule |
+|---|---|
+| R1 | CI passed for the PR's latest commit |
+| R2 | Targets `main`, not a draft, not from a fork |
+| R3 | TDD: `src/**` changes come with `tests/**` changes; `infra/modules/<m>/**` changes come with changes to that module's `*.tftest.hcl` |
+| R4 | Protected paths (`.github/**`, `scripts/ci/**`) are never approved by the gate; a human reviews and merges with admin bypass |
+| R5 | PR title follows conventional commits (`feat:`, `fix:`, `docs:`, `ci:`, `infra:`, `test:`, `refactor:`, `chore:`, `perf:`, `build:`); it becomes the squash-commit message |
+
+- **Triggers:** `workflow_run` after CI completes, plus `pull_request_target` on title edits and ready-for-review. Both run the gate as defined on `main` and never check out or execute PR code, so a PR cannot change the rules that approve it.
+- **Output:** one status comment per PR, updated in place. Approval is tied to the head commit; new pushes dismiss it and the gate re-evaluates after CI.
+- **Implementation:** `scripts/ci/pr_gate.py` (rules as pure functions, unit-tested in `tests/ci/`).
+- **Branch protection on `main`:** PR required, 1 approval, stale approvals dismissed, required check `lint-type-test`, squash merge only, no force pushes, admin bypass kept for protected paths and emergencies.
+
 ---
 
 ## 10. Security guardrails
@@ -436,10 +453,12 @@ All code, application and infrastructure, is written test-first.
 | CI/CD | GitHub Actions |
 | Local storage / cloud storage | SQLite / Aurora Serverless v2 PostgreSQL |
 | Compute | ECS Fargate (Graviton) |
-| Default placement | Fill-first (target utilization 75%) |
+| Default placement | Fill-first (target utilization 75%); when every shared cell is past the target, keep placing into the remaining room (emptiest first) with a capacity-low warning; `503` only when all are full |
 | Partition key | `tenant_id` only; a tenant lives in exactly one cell |
 | Sharding a tenant across cells | Excluded (not in v1 or roadmap) |
 | Development approach | Test-driven development (red → green → refactor), outside-in per stage |
 | Rate-limit algorithm | Token bucket (no leaky bucket) |
 | Rate limiting across routers | In-memory with automatic N-router share + WAF rate rule; Redis-backed limiter built, off by default, fails open |
+| PR approver | `github-actions[bot]` policy gate (§9.1); no AI review, no secrets |
+| Merge strategy | Squash merge only; PR title (conventional commits) becomes the commit message |
 | Customer-hosted cells | Built in v1 (model 3); fully self-hosted later |
