@@ -115,6 +115,34 @@ cellctl cells set-status cell-1 draining   # new tenants now go elsewhere
 cellctl cells set-status cell-1 active
 ```
 
+#### `cells register` parameters
+
+| Parameter | Required | Meaning | Default |
+|---|---|---|---|
+| `cell-id` | Yes | Unique name, 2–63 lowercase letters, digits or hyphens (e.g. `cell-3`). Must match the cell's own `CELL_ID`. | — |
+| `url` | Yes | Address the **control plane and router** use to reach the cell, not your browser's. Locally that's the compose service name, e.g. `http://cell-3:8000`, not `localhost`. | — |
+| `--capacity` | No | Maximum tenants on the cell. Fill-first places tenants up to 75% of it, then uses the remaining room. | Control plane's `DEFAULT_CELL_CAPACITY` (4 locally, otherwise 100) |
+| `--type` | No | `shared` for many tenants; `dedicated` is reserved for one tenant and never used for pooled placement. | `shared` |
+| `--size` | No | `small`, `medium` or `large`. A label for now; maps to AWS instance sizes in stage 5. | `small` |
+| `--wave` | No | Release wave for cell-by-cell rollouts (stage 6); `0` is the canary. | `1` |
+
+**Before registering a cell:**
+1. **It must be running** and reachable at `url`. `register` doesn't check this; a tenant placed on an unreachable cell fails with `provisioning_failed`.
+2. **The control plane must hold its credential:** `CELL_CREDENTIALS` must include `<cell-id>=<token>`, with the same token the cell has as `CELL_INTERNAL_TOKEN`. Otherwise `register` fails with `missing_cell_credential`.
+
+#### Adding a cell to the local stack
+
+When both local cells are full (`no_capacity`), add a third with the ready-made override file [deploy/cell-3.override.yml](deploy/cell-3.override.yml). It starts `cell-3` and restarts the control plane with cell-3's credential. Existing tenants are kept.
+
+```powershell
+docker compose -f deploy/docker-compose.yml -f deploy/cell-3.override.yml up -d --wait
+cellctl cells register cell-3 http://cell-3:8000 --capacity 4
+cellctl tenants create acme5 --name "Acme5" --tier premium   # lands on cell-3
+cellctl cells list
+```
+
+Keep passing both `-f` files for later commands on this stack (`ps`, `logs`, `down -v`), or compose won't know about `cell-3`. To add a `cell-4`, copy the override, rename `cell-3` to `cell-4` throughout, and make its `CELL_CREDENTIALS` line list **all** cells (`cell-1` to `cell-4`): each override replaces the whole value.
+
 ### Output and exit codes
 
 - **Output:** lists print as tables; single records print as JSON.
