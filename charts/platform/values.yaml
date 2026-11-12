@@ -29,6 +29,7 @@ controlPlane:
   seedCells: {}                 # cell-id: gateway URL, registered at startup
   defaultCellCapacity: 4
   targetUtilization: 0.75
+  defaultTenantIsolation: isolated   # or pooled
   rateLimits:
     standard: "50:100"
     premium: "500:1000"

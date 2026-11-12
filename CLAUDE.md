@@ -6,7 +6,7 @@ Reference implementation of cell-based architecture for a multi-tenant SaaS plat
 
 ## Status
 
-Stages 1 and 2 implemented (core platform, traffic protection) on Docker Compose. Next: stage 2.5 (per-tenant services) and 2.6 (Kubernetes + Helm, cluster per cell). Work proceeds in the delivery stages in docs/plan.md §13, one stage at a time.
+Stages 1 and 2 implemented (core platform, traffic protection); runtime is local Kubernetes (k3d: platform cluster + one cluster per cell). Next: stage 2.5 (per-tenant services) and 2.6 (Kubernetes + Helm, cluster per cell). Work proceeds in the delivery stages in docs/plan.md §13, one stage at a time.
 
 ## Working agreements
 
@@ -63,15 +63,15 @@ tests/
 scripts/demo.py
 infra/{bootstrap, customer-bootstrap, modules, stacks, envs}
 .github/workflows/{ci,cd,cell-lifecycle,drift}.yml
-deploy/docker-compose.yml, Dockerfile
+charts/{platform,cell}, Dockerfile (one target per component)
 docs/
 ```
 
 ## Commands
 
 ```powershell
-. .\make up                # set up/activate .venv, load .env, build, start all containers, status
-.\make down | status | build | test | setup     # macOS/Linux: make <target>
+. .\make up                # set up/activate .venv, load .env, k3d clusters (platform + one per cell), images, charts, status
+.\make down | clean | status | build | test | setup     # macOS/Linux: make <target>
 pytest                     # full in-process platform tests, no Docker needed
 python scripts/demo.py     # end-to-end walkthrough against the running stack
 ```

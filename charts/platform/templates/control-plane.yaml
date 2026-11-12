@@ -59,6 +59,8 @@ spec:
               value: {{ .Values.controlPlane.defaultCellCapacity | quote }}
             - name: TARGET_UTILIZATION
               value: {{ .Values.controlPlane.targetUtilization | quote }}
+            - name: DEFAULT_TENANT_ISOLATION
+              value: {{ .Values.controlPlane.defaultTenantIsolation | quote }}
             - name: RATE_LIMIT_STANDARD
               value: {{ .Values.controlPlane.rateLimits.standard | quote }}
             - name: RATE_LIMIT_PREMIUM

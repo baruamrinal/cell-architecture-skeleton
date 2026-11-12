@@ -150,6 +150,11 @@ def platform_values(env: Mapping[str, str], seeds: Sequence[str]) -> dict[str, A
         control_plane["rateLimits"] = limits
     if env.get("DEFAULT_CELL_CAPACITY"):
         control_plane["defaultCellCapacity"] = int(env["DEFAULT_CELL_CAPACITY"])
+    if env.get("DEFAULT_TENANT_ISOLATION"):
+        control_plane["defaultTenantIsolation"] = env["DEFAULT_TENANT_ISOLATION"]
+    router: dict[str, Any] = {"service": {"type": "LoadBalancer", "port": ROUTER_PORT}}
+    if env.get("ROUTER_REPLICAS"):
+        router["replicas"] = int(env["ROUTER_REPLICAS"])
     return {
         "image": {"tag": TAG},
         "secrets": {
@@ -159,7 +164,7 @@ def platform_values(env: Mapping[str, str], seeds: Sequence[str]) -> dict[str, A
             "cellCredentials": {cell: cell_token(env, cell) for cell in seeds},
         },
         "controlPlane": control_plane,
-        "router": {"service": {"type": "LoadBalancer", "port": ROUTER_PORT}},
+        "router": router,
         "redis": {"enabled": env.get("RATE_LIMIT_BACKEND") == "redis"},
     }
 
@@ -185,7 +190,7 @@ def up(
         print(
             f"error: ports {ROUTER_PORT}/{CONTROL_PLANE_PORT} are in use by another program, "
             "probably the old Docker Compose stack. Stop it first:\n"
-            "  docker compose -f deploy/docker-compose.yml down",
+            "  docker compose -p cellarch down",
             file=sys.stderr,
         )
         return 2
@@ -208,7 +213,12 @@ def up(
     for cell in cells:
         clusters.import_images(cell, [image(i) for i in CELL_IMAGES])
         if cell in seeds:
-            values = {"cellId": cell, "secrets": {"internalToken": cell_token(env, cell)}}
+            values: dict[str, Any] = {
+                "cellId": cell,
+                "secrets": {"internalToken": cell_token(env, cell)},
+            }
+            if env.get("MAX_CONCURRENT_REQUESTS"):
+                values["gateway"] = {"maxConcurrentRequests": int(env["MAX_CONCURRENT_REQUESTS"])}
             clusters.helm_upgrade(cell, RELEASE, root / "charts" / "cell", values)
         else:  # deployed with cellctl: keep its generated credential
             clusters.helm_upgrade(cell, RELEASE, root / "charts" / "cell", {}, reuse_values=True)

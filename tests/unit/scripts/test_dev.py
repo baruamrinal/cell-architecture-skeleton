@@ -236,12 +236,18 @@ class TestUp:
 
     def test_tier_limits_and_capacity_from_env(self, root: Path) -> None:
         make_venv(root)
-        (root / ".env").write_text("RATE_LIMIT_STANDARD=5:10\nDEFAULT_CELL_CAPACITY=8\n")
+        (root / ".env").write_text(
+            "RATE_LIMIT_STANDARD=5:10\nDEFAULT_CELL_CAPACITY=8\nROUTER_REPLICAS=3\n"
+            "MAX_CONCURRENT_REQUESTS=40\nDEFAULT_TENANT_ISOLATION=pooled\n"
+        )
         clusters = FakeClusters()
         up(root, clusters)
-        control_plane = clusters.helm("platform")[4]["controlPlane"]
-        assert control_plane["rateLimits"] == {"standard": "5:10"}
-        assert control_plane["defaultCellCapacity"] == 8
+        platform = clusters.helm("platform")[4]
+        assert platform["controlPlane"]["rateLimits"] == {"standard": "5:10"}
+        assert platform["controlPlane"]["defaultCellCapacity"] == 8
+        assert platform["controlPlane"]["defaultTenantIsolation"] == "pooled"
+        assert platform["router"]["replicas"] == 3
+        assert clusters.helm("cell-1")[4]["gateway"] == {"maxConcurrentRequests": 40}
 
     def test_redis_backend(self, root: Path) -> None:
 
