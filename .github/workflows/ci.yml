@@ -42,3 +42,56 @@ jobs:
 
       - name: Test (branch coverage gate >= 90%)
         run: pytest --cov --cov-report=term-missing
+
+  docker-build:
+    # Native runners per architecture (free for public repos): no slow QEMU emulation.
+    name: docker-build (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        run: docker build --tag cellarch:ci .
+
+      - name: Image runs as non-root
+        run: test "$(docker run --rm --entrypoint id cellarch:ci -u)" = "10001"
+
+  compose-smoke:
+    name: compose-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Start platform
+        run: docker compose -f deploy/docker-compose.yml up --build --detach --wait --wait-timeout 180
+
+      - name: Run demo against the stack
+        run: |
+          pip install "httpx>=0.27"
+          python scripts/demo.py
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose -f deploy/docker-compose.yml logs
+
+      - name: Stop platform
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml down --volumes
