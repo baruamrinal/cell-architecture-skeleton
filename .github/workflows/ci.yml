@@ -32,6 +32,11 @@ jobs:
       - name: Install
         run: pip install -e ".[dev]"
 
+      - name: Install Helm (chart tests)
+        uses: azure/setup-helm@v4
+        with:
+          version: v4.3.1
+
       - name: Lint
         run: |
           ruff check .
@@ -61,16 +66,21 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build image
-        run: docker build --tag cellarch:ci .
+      - name: Build one image per component, each non-root
+        run: |
+          for target in router control-plane cell-gateway user-account order-processing; do
+            docker build --target "$target" --tag "cellarch/$target:ci" .
+            test "$(docker run --rm --entrypoint id "cellarch/$target:ci" -u)" = "10001"
+          done
 
-      - name: Image runs as non-root
-        run: test "$(docker run --rm --entrypoint id cellarch:ci -u)" = "10001"
-
-  compose-smoke:
-    name: compose-smoke
+  k3d-smoke:
+    # The real local runtime: a platform cluster + one cluster per cell (make up), then
+    # the end-to-end demo against it.
+    name: k3d-smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
+    env:
+      K3D_VERSION: v5.9.0
     steps:
       - uses: actions/checkout@v7
         with:
@@ -80,18 +90,35 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Start platform
-        run: docker compose -f deploy/docker-compose.yml up --build --detach --wait --wait-timeout 180
+      - uses: azure/setup-helm@v4
+        with:
+          version: v4.3.1
 
-      - name: Run demo against the stack
+      - name: Install k3d (pinned release, checksum verified)
         run: |
-          pip install "httpx>=0.27"
-          python scripts/demo.py
+          base="https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}"
+          curl -sSfL "$base/k3d-linux-amd64" -o k3d
+          curl -sSfL "$base/checksums.txt" -o checksums.txt
+          tr -d '\r' < checksums.txt | awk '$NF ~ /k3d-linux-amd64$/ {print $1"  k3d"}' > k3d.sha256
+          test -s k3d.sha256 || { echo "k3d-linux-amd64 not found in checksums.txt"; cat checksums.txt; exit 1; }
+          sha256sum -c k3d.sha256
+          sudo install -m 0755 k3d /usr/local/bin/k3d
+          k3d version
 
-      - name: Show logs on failure
+      - name: make up (clusters, images, charts)
+        run: python scripts/dev.py up
+
+      - name: Run demo against the platform
+        run: .venv/bin/python scripts/demo.py
+
+      - name: Show cluster state on failure
         if: failure()
-        run: docker compose -f deploy/docker-compose.yml logs
+        run: |
+          for ctx in $(kubectl config get-contexts -o name | grep cellarch); do
+            echo "=== $ctx"; kubectl --context "$ctx" get pods -A -o wide
+            kubectl --context "$ctx" logs -l app.kubernetes.io/part-of=cellarch --all-containers --tail 50 || true
+          done
 
-      - name: Stop platform
+      - name: Delete clusters
         if: always()
-        run: docker compose -f deploy/docker-compose.yml down --volumes
+        run: python scripts/dev.py clean

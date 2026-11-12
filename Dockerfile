@@ -9,8 +9,7 @@
 #   docker build --target order-processing -t cellarch/order-processing:dev .
 #
 # Each image contains only its own code, the shared library (cellarch.common) and the
-# dependencies. The last target, `all`, keeps the previous single image for the Docker
-# Compose runtime until the k3d runtime replaces it.
+# dependencies. `make up` builds all five and loads them into the local k3d clusters.
 #
 # Base image pinned by digest (security guardrail, docs/plan.md §10). The digest is
 # the multi-arch index, so the same pin builds for amd64 and arm64 (Graviton).
@@ -70,7 +69,3 @@ COPY src/cellarch/services/common /app/cellarch/services/common
 COPY src/cellarch/services/order_processing /app/cellarch/services/order_processing
 CMD ["uvicorn", "cellarch.services.order_processing.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
 
-# --- all components in one image (Docker Compose runtime; removed with it) -----------
-FROM base AS all
-COPY src/cellarch /app/cellarch
-CMD ["uvicorn", "cellarch.data_plane.cell.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

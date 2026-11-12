@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Local development tasks:  .\make up | down | status | build | test | setup | help
+    Local development tasks:  .\make up | down | clean | status | build | test | setup | help
 
 .DESCRIPTION
     Thin wrapper around scripts/dev.py (the same targets as the Makefile on macOS/Linux).

@@ -25,13 +25,13 @@ The full design is in [docs/plan.md](docs/plan.md): placement, rate limiting, te
   - keeps serving known tenants when the control plane is down;
   - refreshes stale routes;
   - never exposes `/internal`.
-- **Tooling:** the `cellctl` CLI, a Docker image and a local compose stack.
+- **Tooling:** the `cellctl` CLI, one image per component, Helm charts, and a local Kubernetes runtime: a k3d platform cluster plus **one cluster per cell**.
 
 Later stages are listed in [docs/plan.md §13](docs/plan.md).
 
 ## Quick start
 
-Requires Docker and Python 3.12. From the project folder:
+Requires **Docker**, **Python 3.12**, **[k3d](https://k3d.io)** and **[Helm](https://helm.sh)** (on Windows: `winget install k3d.k3d` and `winget install Helm.Helm`, then open a new terminal). Give Docker Desktop **8 GB or more** of memory; 10–12 GB is recommended. From the project folder:
 
 ```powershell
 . .\make up                 # Windows (PowerShell). The leading dot keeps .venv activated afterwards.
@@ -39,24 +39,35 @@ python scripts/demo.py      # onboard tenants, route, check isolation
 ```
 On macOS/Linux: `make up`, then `source .venv/bin/activate`.
 
+The local topology mirrors production, with **every cell in its own cluster**:
+```
+k3d cluster cellarch-platform   router (localhost:8080), control plane (localhost:8000)
+k3d cluster cellarch-cell-1     cell-1's gateway (more cells: more clusters)
+                                all on the private Docker network "cellarch"
+```
+The router and control plane reach each cell by name (`cell-1.cellarch.internal`) over that network. Cell gateways are **not** published on your machine.
+
 `make up` does everything in one step:
 1. creates `.venv` and installs the project if needed, then activates it;
 2. loads settings from `.env` if it exists;
-3. builds the image;
-4. starts all containers, **including cells added with `cellctl cells deploy`**;
-5. waits until they're healthy;
+3. creates or starts the clusters: the platform plus each cell in `CELLS` (default `cell-1`) and any cell added with `cellctl cells deploy`;
+4. builds the five images and loads them into the clusters;
+5. installs or upgrades the Helm charts and waits until everything is ready;
 6. shows `cellctl status`.
 
 | Command | What it does |
 |---|---|
 | `.\make up` | Set up, build and start everything (rebuilds after code changes) |
-| `.\make down` | Stop and remove the containers; data is kept |
+| `.\make down` | Stop the clusters; data is kept |
+| `.\make clean` | **Delete** the clusters and all their data |
 | `.\make status` | Platform status (`cellctl status`) |
-| `.\make build` | Build the image only |
+| `.\make build` | Build the images only |
 | `.\make test` | Run the test suite with coverage |
 | `.\make setup` | Reinstall the project into `.venv` |
 
-**Settings:** copy [.env.example](.env.example) to `.env` to change tokens or include extra compose files, e.g. `EXTRA_COMPOSE_FILES=deploy/cell-3.override.yml`. `.env` is git-ignored. Without it, development defaults are used.
+**Settings:** copy [.env.example](.env.example) to `.env` to change tokens, seed cells (`CELLS`), limits and more. `.env` is git-ignored. Without it, development defaults are used.
+
+**Coming from the Docker Compose version?** Stop the old stack first with `docker compose -p cellarch down`; `make up` refuses to start while it holds ports 8080 and 8000. The k3d clusters start with fresh data. The old compose volumes stay untouched until you remove them (`docker compose -p cellarch down -v`). Files in `deploy/cells/` are no longer used and can be deleted; they contain cell credentials.
 
 If PowerShell says "running scripts is disabled", run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
 
@@ -68,7 +79,7 @@ curl -H "X-Tenant-ID: acme" -H "Content-Type: application/json" -d '{\"name\":\"
 curl -H "X-Tenant-ID: acme" http://localhost:8080/v1/items
 ```
 
-Stop everything with `.\make down`. To also delete all data, run `docker compose -f deploy/docker-compose.yml down -v`.
+Stop everything with `.\make down`. To also delete all data, run `.\make clean`.
 
 ## Admin CLI (`cellctl`)
 
@@ -93,7 +104,7 @@ Without a `.env` file and with no token set, `cellctl` asks for one rather than 
 |---|---|---|
 | `CELLCTL_URL` | `--url` | `http://localhost:8000` (control plane admin API) |
 | `CELLCTL_TOKEN` | `--token` | `ADMIN_TOKEN` from `.env`; otherwise required |
-| `CELLCTL_COMPOSE_FILE` | `--compose-file` | `deploy/docker-compose.yml` (used by `cells deploy` / `decommission`) |
+| `CELLCTL_CHARTS_DIR` | `--charts-dir` | `charts` (the Helm charts `cells deploy` installs) |
 | `CELLCTL_ACTOR` | `--actor` | your OS user name; recorded as who created or changed cells and tenants |
 
 **Who did what:** cells and tenants record `created_by` and `updated_by` as `admin:<your-name>`. They appear in the JSON and in a **CREATED BY** column in `cells list` and `tenants list`. Seeded cells show `config`. Records from before this feature show `unknown`. Locally the name part is self-reported, because everyone shares the admin token. On AWS (stage 5) it becomes the verified IAM identity of the caller.
@@ -125,17 +136,17 @@ Every command has `--help`, e.g. `cellctl cells deploy --help`.
 
 ### Cell lifecycle: deploy → manage → decommission
 
-**1. Deploy a new cell** (local Docker stack running):
+**1. Deploy a new cell** (after `make up`):
 ```powershell
 cellctl cells deploy cell-4 --capacity 10
 ```
 In one step this:
-1. generates a random credential for the cell;
-2. starts a `cell-4` container on the stack's network;
-3. waits until the cell is healthy;
-4. registers it with the control plane.
+1. creates the cell's **own k3d cluster**, `cellarch-cell-4`, on the private network;
+2. loads the gateway image and installs the `cell` chart with a generated credential, then waits until the gateway is ready;
+3. adds `cell-4.cellarch.internal` to the platform cluster's DNS;
+4. registers the cell with the control plane.
 
-No restart and no hand-edited files are needed. The control plane checks the new cell before accepting it: it must be healthy, report the right cell ID, and accept the credential. If any step fails, the container is removed again and nothing is registered.
+No restart and no hand-edited files are needed. The control plane checks the new cell before accepting it: it must be healthy, report the right cell ID, and accept the credential. If any step fails, the new cluster is deleted again and nothing is registered. Each extra cell needs roughly 0.5–1 GB of Docker memory.
 
 | Option | Meaning | Default |
 |---|---|---|
@@ -144,9 +155,9 @@ No restart and no hand-edited files are needed. The control plane checks the new
 | `--type` | `shared` for many tenants; `dedicated` is reserved for one tenant and never used for pooled placement. | `shared` |
 | `--size` | `small`, `medium` or `large`. A label for now; maps to AWS sizes in stage 5. | `small` |
 | `--wave` | Release wave for cell-by-cell rollouts (stage 6); `0` is the canary. | `1` |
-| `--image` | Container image for the cell. | `cellarch:dev` (built by `docker compose up --build`) |
+| `--image` | Gateway image loaded into the new cluster. | `cellarch/cell-gateway:dev` (built by `make up` / `make build`) |
 
-The generated compose file is kept in `deploy/cells/<cell-id>.yml`. It contains the cell's credential and is git-ignored.
+The cell's credential is stored only as a Kubernetes secret in its own cluster, and in the control plane.
 
 **2. Manage cells**
 ```powershell
@@ -159,19 +170,14 @@ cellctl cells set-status cell-4 active
 
 **3. Decommission a cell**
 ```powershell
-cellctl cells decommission cell-4                 # deregister + remove the container, keep its data
-cellctl cells decommission cell-4 --delete-data   # also delete its data volume
+cellctl cells decommission cell-4                 # deregister and stop its cluster; data is kept
+cellctl cells decommission cell-4 --delete-data   # deregister and delete its cluster with its data
 ```
-Decommissioning is refused while the cell still hosts tenants (`cell_not_empty`). Moving tenants off a cell arrives in stage 3. For cells not deployed by `cellctl`, such as `cell-1` and `cell-2` from the compose file, only the registration is removed; stop their containers yourself.
+Decommissioning is refused while the cell still hosts tenants (`cell_not_empty`). Moving tenants off a cell arrives in stage 3. The seed cells from `CELLS` work the same way. A stopped cell cluster comes back with `make up` (re-register it with `cells register`).
 
-**Registering a cell deployed some other way** (advanced): if you started a cell yourself, register it with its credential, which is the cell's `CELL_INTERNAL_TOKEN`. The cell's `url` is the address the control plane and router use, e.g. `http://cell-5:8000`, not `localhost`.
+**Registering a cell deployed some other way** (advanced): for a cell you run yourself, register it with its credential, which is the cell's `CELL_INTERNAL_TOKEN`. The cell's `url` is the address the router and control plane use, e.g. `http://cell-5.cellarch.internal:8000`, not `localhost`.
 ```powershell
-cellctl cells register cell-5 http://cell-5:8000 --credential <the-cell's-token> --capacity 10
-```
-[deploy/cell-3.override.yml](deploy/cell-3.override.yml) is a hand-written example of such a cell. Its credential is in the control plane's configuration, so `--credential` isn't needed for it:
-```powershell
-docker compose -f deploy/docker-compose.yml -f deploy/cell-3.override.yml up -d --wait
-cellctl cells register cell-3 http://cell-3:8000 --capacity 4
+cellctl cells register cell-5 http://cell-5.cellarch.internal:8000 --credential <the-cell's-token> --capacity 10
 ```
 
 ### Tenant lifecycle
@@ -217,7 +223,7 @@ cellctl tenants get acme                                # "rate_limit": {"rps", 
 - **When changes apply:** within 5 seconds, when the router refreshes its cached route. Limits keep working while the control plane is down.
 - **Tier defaults:** change them with `RATE_LIMIT_STANDARD` / `RATE_LIMIT_PREMIUM` in `.env`.
 - **Several routers:** set `ROUTER_REPLICAS`, and each router enforces its share (limit ÷ replicas).
-- **Shared limiter (optional):** set `RATE_LIMIT_BACKEND=redis` and `COMPOSE_PROFILES=redis` in `.env`, then `. .\make up`. All routers then share **one** bucket per tenant in Redis, so the full limit is exact and `ROUTER_REPLICAS` no longer splits it. It **fails open**: if Redis is down, each router falls back to its own limits, and Redis is retried every few seconds. Traffic never stops because of Redis.
+- **Shared limiter (optional):** set `RATE_LIMIT_BACKEND=redis` in `.env`, then `. .\make up`; Redis then runs in the platform cluster. All routers then share **one** bucket per tenant in Redis, so the full limit is exact and `ROUTER_REPLICAS` no longer splits it. It **fails open**: if Redis is down, each router falls back to its own limits, and Redis is retried every few seconds. Traffic never stops because of Redis.
 
 Moving tenants between cells (stage 3) and seasonal schedules (stage 4) will be added here.
 
@@ -282,7 +288,7 @@ Each cell handles at most `MAX_CONCURRENT_REQUESTS` requests at once (default 10
 - **Exit codes:**
   - `0` on success;
   - `1` when the control plane or Docker returns an error, or can't be reached;
-  - `2` for usage errors, such as a missing token, an invalid option or a missing compose file.
+  - `2` for usage errors, such as a missing token, an invalid option or a missing chart.
 
 ## Images and Helm charts
 
@@ -301,7 +307,7 @@ Helm charts for the Kubernetes runtime (stage 2.6, one cluster per cell):
 - **Hardened by default:** non-root, read-only filesystem, all capabilities dropped, probes and resource limits, tokens only from Kubernetes secrets.
 - **Network policies:** deny all ingress, then allow only what each component needs.
 
-The charts are tested with `pytest tests/charts`, which needs `helm` installed. The local k3d runtime that uses them comes next. Until then, `make up` still runs Docker Compose.
+The charts are tested with `pytest tests/charts` (needs `helm`), and `make up` installs them into the local k3d clusters.
 
 ## Development
 
@@ -324,20 +330,19 @@ src/cellarch/
   control_plane/           registry, fill-first placement, onboarding, admin + routing APIs
   data_plane/router/       tenant routing, route cache with stale fallback, proxy
   data_plane/cell/         tenant-scoped store and API, /internal provisioning
-  cli/                     cellctl and its local Docker runner (cells deploy/decommission)
+  cli/                     cellctl and the local cluster toolkit (k3d, Helm, cell DNS)
   services/                per-tenant microservices (stage 2.5; wired into cells next)
     common/                migrations, idempotency keys, cursor pagination, auth, health probes
     user_account/          a tenant's users
     order_processing/      a tenant's orders (checks users via its own user-account)
 tests/acceptance/          stage acceptance tests against the in-process platform
 tests/unit/                unit tests per component
-scripts/demo.py            end-to-end walkthrough (also the compose smoke test)
+scripts/demo.py            end-to-end walkthrough (also the k3d smoke test in CI)
 scripts/dev.py             local tasks behind make.ps1 (Windows) and Makefile (macOS/Linux)
 scripts/ci/pr_gate.py      PR policy gate
 charts/platform/           Helm chart: router + control plane (platform cluster)
 charts/cell/               Helm chart: one cell's gateway (the cell's own cluster)
 tests/charts/              chart tests (helm template + lint)
-deploy/docker-compose.yml  local platform (until the k3d runtime replaces it)
 Dockerfile                 one image per component (multi-stage targets)
 ```
 

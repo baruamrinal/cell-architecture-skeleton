@@ -1,12 +1,12 @@
 """Wire contracts and identifiers shared across components."""
 
-import re
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
-TENANT_ID_PATTERN = r"^[a-z0-9][a-z0-9-]{1,62}$"
-CELL_ID_PATTERN = TENANT_ID_PATTERN
+from cellarch.common.ids import CELL_ID_PATTERN, TENANT_ID_PATTERN, is_valid_tenant_id
+
+__all__ = ["CELL_ID_PATTERN", "TENANT_ID_PATTERN", "is_valid_tenant_id"]  # re-exported
 
 CellType = Literal["shared", "dedicated"]
 CellHosting = Literal["vendor", "customer"]
@@ -17,12 +17,6 @@ PlacementMode = Literal["pooled", "dedicated"]
 Tier = Literal["standard", "premium"]
 # Does the tenant share database tables in its cell (pooled) or have its own database?
 Isolation = Literal["pooled", "isolated"]
-
-_TENANT_ID = re.compile(TENANT_ID_PATTERN)
-
-
-def is_valid_tenant_id(value: str) -> bool:
-    return _TENANT_ID.fullmatch(value) is not None
 
 
 class RateLimit(BaseModel):

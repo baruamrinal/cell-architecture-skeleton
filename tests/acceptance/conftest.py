@@ -171,8 +171,12 @@ def platform(tmp_path: Path) -> Iterator[Platform]:
     for cell_id in SPARE_CELL_IDS:
         cells[cell_id] = Switch(_nothing_running)
         cells[cell_id].reachable = False
+    # Each cell answers by its short name and by its DNS name in the cellarch.internal
+    # zone, the address the k3d runtime uses between clusters.
     cell_mounts: dict[str, httpx.AsyncBaseTransport] = {
-        f"http://{cell_id}": httpx.ASGITransport(app=app) for cell_id, app in cells.items()
+        f"http://{host}": httpx.ASGITransport(app=app)
+        for cell_id, app in cells.items()
+        for host in (cell_id, f"{cell_id}.cellarch.internal")
     }
 
     control_plane_app = create_control_plane(

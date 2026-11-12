@@ -85,6 +85,7 @@ def test_control_plane_settings_and_storage() -> None:
     assert deployment["spec"]["strategy"]["type"] == "Recreate"  # single-writer SQLite volume
     assert variables["SEED_CELLS"] == "cell-1=http://cell-1.cellarch.internal:8000"
     assert variables["CONTROL_PLANE_DB_PATH"] == "/data/control-plane.db"
+    assert variables["DEFAULT_TENANT_ISOLATION"] == "isolated"
     assert find(objects, "PersistentVolumeClaim", "control-plane")
 
 

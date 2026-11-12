@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import json
-import subprocess
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from cellarch.cli.cellctl import main
-from cellarch.cli.docker import DockerError, LocalDocker
+from cellarch.cli.clusters import ClusterError
 from cellarch.control_plane.app import ControlPlaneSettings, create_app
 
 from ..control_plane.test_cell_lifecycle_unit import fake_cells
@@ -37,34 +36,69 @@ def control_plane(tmp_path: Path) -> Iterator[TestClient]:
         yield client
 
 
-class RecordingDocker:
-    def __init__(self, fail_on: str | None = None) -> None:
+class FakeClusters:
+    def __init__(self, existing: dict[str, str] | None = None, fail_on: str | None = None):
+        self.existing = dict(existing or {})
         self.fail_on = fail_on
-        self.calls: list[tuple[str, ...]] = []
+        self.calls: list[tuple[Any, ...]] = []
 
-    def compose(self, files: Sequence[Path], *args: str) -> None:
-        self.calls.append(("compose", *args))
-        if args[0] == self.fail_on:
-            raise DockerError(f"{args[0]} failed")
+    def _record(self, *call: Any) -> None:
+        self.calls.append(call)
+        if self.fail_on == call[0]:
+            raise ClusterError(f"{call[0]} failed")
 
-    def volume_exists(self, name: str) -> bool:
-        return False
+    def clusters(self) -> dict[str, str]:
+        return dict(self.existing)
 
-    def remove_volume(self, name: str) -> None:
-        self.calls.append(("volume-rm", name))
+    def cell_ids(self) -> list[str]:
+        return sorted(c for c in self.existing if c != "platform")
+
+    def ensure_cluster(self, short: str, *, ports: Iterable[str] = ()) -> None:
+        self._record("cluster", short)
+        self.existing[short] = "running"
+
+    def import_images(self, short: str, images: Sequence[str]) -> None:
+        self._record("import", short, tuple(images))
+
+    def helm_upgrade(
+        self, short: str, release: str, chart: Path, values: Mapping[str, Any], **kw: Any
+    ) -> None:
+        self._record("helm", short, chart.name, dict(values))
+
+    def ensure_network(self) -> None:
+        pass
+
+    def delete_network(self) -> None:
+        pass
+
+    def node_ip(self, short: str) -> str:
+        return "172.20.0.9"
+
+    def set_cell_dns(self, entries: Mapping[str, str]) -> bool:
+        self._record("dns", tuple(sorted(entries)))
+        return True
+
+    def stop(self, short: str) -> None:
+        self._record("stop", short)
+        self.existing[short] = "stopped"
+
+    def delete(self, short: str) -> None:
+        self._record("delete", short)
+        self.existing.pop(short, None)
+
+    def kinds(self) -> list[str]:
+        return [c[0] for c in self.calls]
 
 
 @pytest.fixture
-def compose_file(tmp_path: Path) -> Path:
-    path = tmp_path / "deploy" / "docker-compose.yml"
-    path.parent.mkdir()
-    path.write_text("name: cellarch\n", encoding="utf-8")
-    return path
+def charts(tmp_path: Path) -> Path:
+    (tmp_path / "charts" / "cell").mkdir(parents=True)
+    return tmp_path / "charts"
 
 
-def run(client: TestClient, *args: str, docker: Any = None, compose: Path | None = None) -> int:
-    prefix = ["--compose-file", str(compose)] if compose else []
-    return main([*prefix, *args], client=client, token=ADMIN, docker=docker)
+def run(client: TestClient, *args: str, clusters: Any = None, charts: Path | None = None) -> int:
+    prefix = ["--charts-dir", str(charts)] if charts else []
+    return main([*prefix, *args], client=client, token=ADMIN, clusters=clusters)
 
 
 class TestRegisterWithCredential:
@@ -112,12 +146,13 @@ class TestStatus:
         assert "Cells: 1 (1 placeable)" in out
         assert "Free slots: 1" in out
         assert "Target utilization: 75%" in out
-        assert "cell-1" in out
         assert "capacity_low" in out
 
-    def test_status_without_warnings(
+    def test_status_without_warnings_and_without_cells(
         self, control_plane: TestClient, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        assert run(control_plane, "status") == 0
+        assert "no_capacity" in capsys.readouterr().out
         run(control_plane, "cells", "register", "cell-1", "http://cell-1", "--capacity", "10")
         capsys.readouterr()
         run(control_plane, "status")
@@ -125,239 +160,83 @@ class TestStatus:
 
 
 class TestDeploy:
-    def test_refuses_an_existing_cell_without_touching_docker(
-        self, control_plane: TestClient, compose_file: Path, capsys: pytest.CaptureFixture[str]
+    def test_refuses_an_existing_cell_without_touching_clusters(
+        self, control_plane: TestClient, charts: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         run(control_plane, "cells", "register", "cell-1", "http://cell-1")
-        docker = RecordingDocker()
+        clusters = FakeClusters()
         assert (
-            run(control_plane, "cells", "deploy", "cell-1", docker=docker, compose=compose_file)
-            == 1
+            run(control_plane, "cells", "deploy", "cell-1", clusters=clusters, charts=charts) == 1
         )
-        assert docker.calls == []
+        assert clusters.calls == []
         assert "cell_exists" in capsys.readouterr().err
 
-    def test_invalid_cell_id_is_a_usage_error(
-        self, control_plane: TestClient, compose_file: Path
+    def test_refuses_when_the_cluster_already_exists(
+        self, control_plane: TestClient, charts: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        docker = RecordingDocker()
+        clusters = FakeClusters({"cell-4": "stopped"})
         assert (
-            run(control_plane, "cells", "deploy", "Cell_4", docker=docker, compose=compose_file)
-            == 2
+            run(control_plane, "cells", "deploy", "cell-4", clusters=clusters, charts=charts) == 1
         )
-        assert docker.calls == []
+        assert clusters.calls == []
+        assert "cell_cluster_exists" in capsys.readouterr().err
 
-    def test_missing_compose_file_is_a_usage_error(
-        self, control_plane: TestClient, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    def test_usage_errors(
+        self,
+        control_plane: TestClient,
+        tmp_path: Path,
+        charts: Path,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
-        missing = tmp_path / "nope.yml"
-        assert run(control_plane, "cells", "deploy", "cell-4", compose=missing) == 2
-        assert "compose file not found" in capsys.readouterr().err
-
-    def test_container_failure_cleans_up(
-        self, control_plane: TestClient, compose_file: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        docker = RecordingDocker(fail_on="up")
+        clusters = FakeClusters()
         assert (
-            run(control_plane, "cells", "deploy", "cell-4", docker=docker, compose=compose_file)
-            == 1
+            run(control_plane, "cells", "deploy", "Cell_4", clusters=clusters, charts=charts) == 2
         )
-        assert ("compose", "rm", "--stop", "--force", "cell-4") in docker.calls
-        assert ("volume-rm", "cellarch_cell-4-data") in docker.calls
-        assert not (compose_file.parent / "cells" / "cell-4.yml").exists()
-        assert "up failed" in capsys.readouterr().err
-
-    def test_failure_keeps_a_data_volume_that_already_existed(
-        self, control_plane: TestClient, compose_file: Path
-    ) -> None:
-        class ExistingVolume(RecordingDocker):
-            def volume_exists(self, name: str) -> bool:
-                return True
-
-        docker = ExistingVolume(fail_on="up")
+        missing = tmp_path / "nope"
         assert (
-            run(control_plane, "cells", "deploy", "cell-4", docker=docker, compose=compose_file)
-            == 1
+            run(control_plane, "cells", "deploy", "cell-4", clusters=clusters, charts=missing) == 2
         )
-        assert not any(call[0] == "volume-rm" for call in docker.calls)
+        assert "chart not found" in capsys.readouterr().err
+        assert clusters.calls == []
 
-    def test_generated_compose_file(self, control_plane: TestClient, compose_file: Path) -> None:
-        # The fake cells don't know cell-4's random token, so registration fails afterwards;
-        # inspect the file through the up call instead.
-        captured: dict[str, Any] = {}
-
-        class Capturing(RecordingDocker):
-            def compose(self, files: Sequence[Path], *args: str) -> None:
-                if args[0] == "up":
-                    captured.update(json.loads(files[-1].read_text(encoding="utf-8")))
-                    captured["files"] = [str(f) for f in files]
-                super().compose(files, *args)
-
-        run(
-            control_plane,
-            "cells",
-            "deploy",
-            "cell-4",
-            "--image",
-            "registry/cellarch:1.2",
-            docker=Capturing(),
-            compose=compose_file,
-        )
-        service = captured["services"]["cell-4"]
-        assert service["image"] == "registry/cellarch:1.2"
-        assert service["environment"]["CELL_ID"] == "cell-4"
-        assert service["volumes"] == ["cell-4-data:/data"]
-        assert service["read_only"] is True
-        assert service["networks"] == ["platform"]
-        assert "cell-4-data" in captured["volumes"]
-        assert captured["files"][0] == str(compose_file)
-
-
-class TestDecommission:
-    def test_refused_while_tenants_remain(
-        self, control_plane: TestClient, compose_file: Path, capsys: pytest.CaptureFixture[str]
+    def test_creates_a_cluster_installs_the_chart_then_registers(
+        self, control_plane: TestClient, charts: Path
     ) -> None:
-        run(control_plane, "cells", "register", "cell-1", "http://cell-1")
-        run(control_plane, "tenants", "create", "acme")
-        docker = RecordingDocker()
-        assert (
-            run(
-                control_plane,
-                "cells",
-                "decommission",
-                "cell-1",
-                docker=docker,
-                compose=compose_file,
-            )
-            == 1
-        )
-        assert docker.calls == []
-        assert "cell_not_empty" in capsys.readouterr().err
-
-    def test_cell_not_deployed_by_cellctl_is_only_deregistered(
-        self, control_plane: TestClient, compose_file: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        run(control_plane, "cells", "register", "cell-1", "http://cell-1")
-        docker = RecordingDocker()
+        # The fake cells don't know the generated credential, so registration is rejected
+        # at the end; the steps before it, and the cleanup, are what this test checks.
+        clusters = FakeClusters({"platform": "running", "cell-1": "running"})
         code = run(
             control_plane,
-            "cells",
-            "decommission",
-            "cell-1",
-            "--delete-data",
-            docker=docker,
-            compose=compose_file,
-        )
-        assert code == 0
-        assert docker.calls == []
-        assert "not deployed by cellctl" in capsys.readouterr().err
-
-    def test_container_removal_failure_is_reported(
-        self, control_plane: TestClient, compose_file: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        run(control_plane, "cells", "register", "cell-1", "http://cell-1")
-        cells_dir = compose_file.parent / "cells"
-        cells_dir.mkdir()
-        (cells_dir / "cell-1.yml").write_text("{}", encoding="utf-8")
-        docker = RecordingDocker(fail_on="rm")
-        assert (
-            run(
-                control_plane,
-                "cells",
-                "decommission",
-                "cell-1",
-                docker=docker,
-                compose=compose_file,
-            )
-            == 1
-        )
-        assert "rm failed" in capsys.readouterr().err
-
-    def test_keeps_data_by_default(self, control_plane: TestClient, compose_file: Path) -> None:
-        run(control_plane, "cells", "register", "cell-1", "http://cell-1")
-        cells_dir = compose_file.parent / "cells"
-        cells_dir.mkdir()
-        (cells_dir / "cell-1.yml").write_text("{}", encoding="utf-8")
-        docker = RecordingDocker()
-        assert (
-            run(
-                control_plane,
-                "cells",
-                "decommission",
-                "cell-1",
-                docker=docker,
-                compose=compose_file,
-            )
-            == 0
-        )
-        assert docker.calls == [("compose", "rm", "--stop", "--force", "cell-1")]
-
-
-class TestLocalDocker:
-    def test_builds_compose_commands(self) -> None:
-        seen: list[list[str]] = []
-
-        def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-            seen.append(cmd)
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-
-        docker = LocalDocker(run=fake_run)
-        docker.compose([Path("a.yml"), Path("b.yml")], "up", "-d", "cell-4")
-        docker.remove_volume("cellarch_cell-4-data")
-        assert docker.volume_exists("v")
-        assert seen == [
-            ["docker", "compose", "-f", "a.yml", "-f", "b.yml", "up", "-d", "cell-4"],
-            ["docker", "volume", "rm", "cellarch_cell-4-data"],
-            ["docker", "volume", "inspect", "v"],
-        ]
-
-    def test_volume_exists_is_false_when_inspect_fails(self) -> None:
-        def failing(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-            return subprocess.CompletedProcess(cmd, 1, "", "no such volume")
-
-        assert not LocalDocker(run=failing).volume_exists("v")
-
-    def test_failures_raise_with_docker_output(self) -> None:
-        def failing(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-            return subprocess.CompletedProcess(cmd, 1, "", "container unhealthy\n")
-
-        with pytest.raises(DockerError, match="container unhealthy"):
-            LocalDocker(run=failing).compose([Path("a.yml")], "up")
-
-    def test_missing_docker_cli(self) -> None:
-        def missing(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-            raise FileNotFoundError("docker")
-
-        with pytest.raises(DockerError, match="docker CLI not found"):
-            LocalDocker(run=missing).remove_volume("v")
-
-
-class TestEdgeCases:
-    def test_deploy_reports_control_plane_errors_before_touching_docker(
-        self, compose_file: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        def unauthorized(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(401, json={"error": "unauthenticated", "message": "bad token"})
-
-        client = httpx.Client(transport=httpx.MockTransport(unauthorized), base_url="http://cp")
-        docker = RecordingDocker()
-        code = main(
-            ["--compose-file", str(compose_file), "cells", "deploy", "cell-4"],
-            client=client,
-            token="wrong",
-            docker=docker,
-        )
+            "cells", "deploy", "cell-4", "--image", "reg/cell-gateway:1.2",
+            clusters=clusters, charts=charts,
+        )  # fmt: skip
         assert code == 1
-        assert docker.calls == []
-        assert "unauthenticated" in capsys.readouterr().err
+        assert clusters.kinds()[:4] == ["cluster", "import", "helm", "dns"]
+        assert clusters.calls[1] == ("import", "cell-4", ("reg/cell-gateway:1.2",))
+        helm = clusters.calls[2]
+        assert (helm[1], helm[2], helm[3]["cellId"]) == ("cell-4", "cell", "cell-4")
+        assert len(helm[3]["secrets"]["internalToken"]) >= 32  # generated
+        assert clusters.calls[3] == ("dns", ("cell-1", "cell-4"))
+        # Registration failed, so the new cluster was removed again.
+        assert clusters.calls[4] == ("delete", "cell-4")
+        assert clusters.calls[-1] == ("dns", ("cell-1",))
 
-    def test_deploy_warns_when_cleanup_also_fails(
-        self, control_plane: TestClient, compose_file: Path, capsys: pytest.CaptureFixture[str]
+    def test_cluster_failure_cleans_up(
+        self, control_plane: TestClient, charts: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        class BrokenDocker(RecordingDocker):
-            def compose(self, files: Sequence[Path], *args: str) -> None:
-                self.calls.append(("compose", *args))
-                raise DockerError(f"{args[0]} failed")
+        clusters = FakeClusters(fail_on="helm")
+        assert (
+            run(control_plane, "cells", "deploy", "cell-4", clusters=clusters, charts=charts) == 1
+        )
+        assert ("delete", "cell-4") in clusters.calls
+        assert "helm failed" in capsys.readouterr().err
+
+    def test_warns_when_cleanup_also_fails(
+        self, control_plane: TestClient, charts: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        class Broken(FakeClusters):
+            def delete(self, short: str) -> None:
+                raise ClusterError("delete failed")
 
         assert (
             run(
@@ -365,19 +244,78 @@ class TestEdgeCases:
                 "cells",
                 "deploy",
                 "cell-4",
-                docker=BrokenDocker(),
-                compose=compose_file,
+                clusters=Broken(fail_on="helm"),
+                charts=charts,
             )
             == 1
         )
-        err = capsys.readouterr().err
-        assert "cleanup incomplete" in err
-        assert not (compose_file.parent / "cells" / "cell-4.yml").exists()
+        assert "cleanup incomplete" in capsys.readouterr().err
 
-    def test_status_with_no_cells(
+
+class TestDecommission:
+    def test_refused_while_tenants_remain(
         self, control_plane: TestClient, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        assert run(control_plane, "status") == 0
-        out = capsys.readouterr().out
-        assert "Cells: 0 (0 placeable)" in out
-        assert "no_capacity" in out
+        run(control_plane, "cells", "register", "cell-1", "http://cell-1")
+        run(control_plane, "tenants", "create", "acme")
+        clusters = FakeClusters({"cell-1": "running"})
+        assert run(control_plane, "cells", "decommission", "cell-1", clusters=clusters) == 1
+        assert clusters.calls == []
+        assert "cell_not_empty" in capsys.readouterr().err
+
+    def test_without_a_local_cluster_only_deregisters(
+        self, control_plane: TestClient, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        run(control_plane, "cells", "register", "cell-1", "http://cell-1")
+        clusters = FakeClusters()
+        assert run(control_plane, "cells", "decommission", "cell-1", clusters=clusters) == 0
+        assert clusters.calls == []
+        assert "no local cluster" in capsys.readouterr().err
+
+    def test_stops_the_cluster_and_keeps_its_data_by_default(
+        self, control_plane: TestClient, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        run(control_plane, "cells", "register", "cell-1", "http://cell-1")
+        clusters = FakeClusters({"platform": "running", "cell-1": "running", "cell-2": "running"})
+        capsys.readouterr()
+        assert run(control_plane, "cells", "decommission", "cell-1", clusters=clusters) == 0
+        assert clusters.calls == [("stop", "cell-1"), ("dns", ("cell-2",))]
+        assert json.loads(capsys.readouterr().out)["cluster"] == "stopped"
+
+    def test_delete_data_deletes_the_cluster(self, control_plane: TestClient) -> None:
+        run(control_plane, "cells", "register", "cell-1", "http://cell-1")
+        clusters = FakeClusters({"cell-1": "running"})
+        assert (
+            run(
+                control_plane, "cells", "decommission", "cell-1", "--delete-data", clusters=clusters
+            )
+            == 0
+        )
+        assert clusters.calls == [("delete", "cell-1"), ("dns", ())]
+
+    def test_cluster_errors_are_reported(
+        self, control_plane: TestClient, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        run(control_plane, "cells", "register", "cell-1", "http://cell-1")
+        clusters = FakeClusters({"cell-1": "running"}, fail_on="stop")
+        assert run(control_plane, "cells", "decommission", "cell-1", clusters=clusters) == 1
+        assert "stop failed" in capsys.readouterr().err
+
+
+def test_deploy_reports_control_plane_errors_before_touching_clusters(
+    charts: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def unauthorized(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "unauthenticated", "message": "bad token"})
+
+    client = httpx.Client(transport=httpx.MockTransport(unauthorized), base_url="http://cp")
+    clusters = FakeClusters()
+    code = main(
+        ["--charts-dir", str(charts), "cells", "deploy", "cell-4"],
+        client=client,
+        token="wrong",
+        clusters=clusters,
+    )
+    assert code == 1
+    assert clusters.calls == []
+    assert "unauthenticated" in capsys.readouterr().err
