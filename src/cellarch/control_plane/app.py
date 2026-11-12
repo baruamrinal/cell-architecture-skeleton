@@ -26,6 +26,7 @@ from cellarch.common.contracts import (
     CellSize,
     CellStatus,
     CellType,
+    Isolation,
     PlacementMode,
     RoutingEntry,
     TenantStatus,
@@ -50,6 +51,14 @@ log = logging.getLogger("cellarch.control_plane")
 ADMIN_ROLE = "admin"
 
 _ACTOR_NAME = re.compile(r"[A-Za-z0-9._@-]{1,64}")
+
+
+def _isolation(value: str) -> Isolation:
+    if value == "pooled":
+        return "pooled"
+    if value == "isolated":
+        return "isolated"
+    raise ConfigError(f"DEFAULT_TENANT_ISOLATION must be 'pooled' or 'isolated', not {value!r}")
 
 
 def actor_label(role: str, actor: str | None) -> str:
@@ -77,6 +86,8 @@ class ControlPlaneSettings:
     seed_cells: dict[str, str] = field(default_factory=dict)
     default_cell_capacity: int = 100
     target_utilization: float = 0.75
+    # Each tenant gets its own database in its cell unless onboarded as pooled.
+    default_isolation: Isolation = "isolated"
 
     @classmethod
     def from_env(cls) -> "ControlPlaneSettings":
@@ -93,6 +104,7 @@ class ControlPlaneSettings:
             seed_cells=seeds,
             default_cell_capacity=int(os.environ.get("DEFAULT_CELL_CAPACITY", "100")),
             target_utilization=float(os.environ.get("TARGET_UTILIZATION", "0.75")),
+            default_isolation=_isolation(os.environ.get("DEFAULT_TENANT_ISOLATION", "isolated")),
         )
 
 
@@ -124,6 +136,7 @@ class Cell(BaseModel):
     capacity: int
     wave: int
     tenant_count: int
+    isolated_tenants: int
     utilization: float
     created_at: str
     created_by: str
@@ -135,6 +148,7 @@ class TenantCreate(BaseModel):
     tenant_id: str | None = Field(default=None, pattern=TENANT_ID_PATTERN)
     name: str = Field(min_length=1, max_length=200)
     tier: Tier = "standard"
+    isolation: Isolation | None = None  # default: ControlPlaneSettings.default_isolation
 
 
 class Tenant(BaseModel):
@@ -142,6 +156,7 @@ class Tenant(BaseModel):
     name: str
     tier: Tier
     placement_mode: PlacementMode
+    isolation: Isolation
     cell_id: str
     status: TenantStatus
     created_at: str
@@ -161,6 +176,7 @@ class StatusTotals(BaseModel):
     tenants: int
     capacity: int  # across placeable cells
     free_slots: int  # across placeable cells
+    isolated_tenants: int  # tenants with their own database
 
 
 class PlatformStatus(BaseModel):
@@ -356,6 +372,7 @@ def create_app(
                 free_slots=sum(
                     max(0, int(c["capacity"]) - int(c["tenant_count"])) for c in placeable
                 ),
+                isolated_tenants=sum(int(c["isolated_tenants"]) for c in rows),
             ),
             cells=[_cell(row) for row in rows],
             warnings=warnings,
@@ -374,6 +391,7 @@ def create_app(
         body: TenantCreate, actor: Annotated[str, Depends(current_actor)]
     ) -> Tenant:
         tenant_id = body.tenant_id or f"t-{uuid.uuid4().hex[:12]}"
+        isolation = body.isolation or settings.default_isolation
         if store.get_tenant(tenant_id) is not None:
             raise ApiError(409, "tenant_exists", f"tenant {tenant_id} already exists")
 
@@ -393,13 +411,13 @@ def create_app(
         # Placement and insert are not atomic; acceptable for a single control plane
         # instance (plan §2.1). A shared database needs a transactional reservation.
         try:
-            store.add_tenant(tenant_id, body.name, body.tier, decision.cell_id, actor)
+            store.add_tenant(tenant_id, body.name, body.tier, decision.cell_id, actor, isolation)
         except DuplicateError as exc:  # pragma: no cover - concurrent create of the same id
             raise ApiError(409, "tenant_exists", f"tenant {tenant_id} already exists") from exc
 
         cell = require_cell(decision.cell_id)
         try:
-            await cells.provision_tenant(decision.cell_id, str(cell["url"]), tenant_id)
+            await cells.provision_tenant(decision.cell_id, str(cell["url"]), tenant_id, isolation)
         except Exception as exc:
             store.delete_tenant(tenant_id)
             log.warning("provisioning %s on %s failed: %s", tenant_id, decision.cell_id, exc)

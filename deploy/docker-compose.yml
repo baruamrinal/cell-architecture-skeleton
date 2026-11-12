@@ -45,6 +45,8 @@ services:
       SEED_CELLS: cell-1=http://cell-1:8000,cell-2=http://cell-2:8000
       # Small on purpose so the demo shows fill-first moving on to the next cell.
       DEFAULT_CELL_CAPACITY: "4"
+      # Each tenant gets its own database in its cell unless onboarded as pooled.
+      DEFAULT_TENANT_ISOLATION: ${DEFAULT_TENANT_ISOLATION:-isolated}
     volumes: [control-plane-data:/data]
     ports: ["127.0.0.1:8000:8000"]
     healthcheck:

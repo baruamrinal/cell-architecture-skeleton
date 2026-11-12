@@ -41,9 +41,7 @@ def test_get_and_delete_items_in_an_isolated_database(store: CellStore) -> None:
     assert store.get_item("acme", item["id"]) is None
 
 
-def test_deleting_an_isolated_tenant_removes_its_database(
-    store: CellStore, tmp_path: Path
-) -> None:
+def test_deleting_an_isolated_tenant_removes_its_database(store: CellStore, tmp_path: Path) -> None:
     store.provision_tenant("acme", isolation="isolated")
     store.create_item("acme", "a", {})
     assert store.delete_tenant("acme") is True

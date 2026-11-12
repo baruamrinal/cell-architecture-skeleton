@@ -71,8 +71,11 @@ class CellClient:
                 "cell_unreachable", f"{cell_url} internal API returned HTTP {probe.status_code}"
             )
 
-    async def provision_tenant(self, cell_id: str, cell_url: str, tenant_id: str) -> None:
-        await self._call("POST", cell_id, cell_url, "/internal/tenants", {"tenant_id": tenant_id})
+    async def provision_tenant(
+        self, cell_id: str, cell_url: str, tenant_id: str, isolation: str = "pooled"
+    ) -> None:
+        body = {"tenant_id": tenant_id, "isolation": isolation}
+        await self._call("POST", cell_id, cell_url, "/internal/tenants", body)
 
     async def _call(
         self, method: str, cell_id: str, cell_url: str, path: str, body: object = None

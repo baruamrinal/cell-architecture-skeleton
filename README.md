@@ -177,17 +177,26 @@ cellctl cells register cell-3 http://cell-3:8000 --capacity 4
 ```powershell
 cellctl tenants create acme --name "Acme Corp" --tier premium   # placed on a cell automatically
 cellctl tenants create globex                                   # name defaults to the ID
+cellctl tenants create trial-42 --isolation pooled              # shares tables (see below)
 cellctl tenants list
 cellctl tenants get acme
 ```
 
 ```text
-TENANT  NAME       TIER      CELL    STATUS
-acme    Acme Corp  premium   cell-1  active
-globex  globex     standard  cell-1  active
+TENANT    NAME       TIER      ISOLATION  CELL    STATUS  CREATED BY
+acme      Acme Corp  premium   isolated   cell-1  active  admin:mrinal
+globex    globex     standard  isolated   cell-1  active  admin:mrinal
+trial-42  trial-42   standard  pooled     cell-1  active  admin:mrinal
 ```
 
 Tenant IDs are 2–63 characters: lowercase letters, digits and hyphens, starting with a letter or digit (for example `acme`, `acme-eu`, `t-42`). `--tier` defaults to `standard`.
+
+**Data isolation:** tenants share cells up to each cell's capacity, but **each tenant gets its own database inside its cell** by default (`--isolation isolated`). In the cell's volume that's `tenants/<tenant-id>.db`.
+- `--isolation pooled` stores a tenant in shared tables instead, separated by `tenant_id`. It's meant for free, trial or demo tenants where cost and density matter more.
+- Removing an isolated tenant deletes its database.
+- Change the default with `DEFAULT_TENANT_ISOLATION` in `.env`.
+
+See [docs/plan.md §3.4](docs/plan.md).
 
 Moving tenants between cells (stage 3) and seasonal schedules (stage 4) will be added here.
 
