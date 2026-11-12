@@ -504,6 +504,8 @@ All code, application and infrastructure, is written test-first.
 | Tenant data isolation | Per tenant: `isolated` (own database in its cell, **default**) or `pooled` (shared tables); tenants still share cells up to capacity (§3.4) |
 | Development approach | Test-driven development (red → green → refactor), outside-in per stage |
 | Rate-limit algorithm | Token bucket (no leaky bucket) |
+| Usage metering | Router counts requests, throttles and status classes per known tenant (in memory, per replica); `/_router/stats` behind a separate metrics token; `cellctl usage` |
+| Cell request cap | `MAX_CONCURRENT_REQUESTS` (default 100) per cell; over it, `503 cell_overloaded` immediately, no queueing; `/healthz` exempt |
 | Default rate limits | standard 50 requests/s burst 100, premium 500/s burst 1000 (`RATE_LIMIT_STANDARD` / `RATE_LIMIT_PREMIUM`); per-tenant override via `cellctl tenants set-limit`; limits travel in the routing entry |
 | Rate limiting across routers | In-memory with automatic N-router share + WAF rate rule; Redis-backed limiter built, off by default, fails open |
 | PR approver | `github-actions[bot]` policy gate (§9.1); no AI review, no secrets |

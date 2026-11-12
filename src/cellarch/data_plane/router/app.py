@@ -10,6 +10,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import quote, unquote
 
 import httpx
@@ -21,6 +22,8 @@ from cellarch.common.contracts import RoutingEntry, is_valid_tenant_id
 from cellarch.common.errors import error_response, install_error_handlers
 from cellarch.common.headers import INTERNAL_TOKEN_HEADER, REQUEST_ID_HEADER, TENANT_HEADER
 from cellarch.common.logging import configure_logging
+from cellarch.common.security import TokenAuth
+from cellarch.data_plane.router.metering import Metering
 from cellarch.data_plane.router.rate_limit import Decision, InMemoryRateLimiter, RateLimiter
 from cellarch.data_plane.router.routing import (
     RoutingCache,
@@ -57,6 +60,8 @@ class RouterSettings:
     # Number of router replicas sharing the traffic; each enforces limit / replicas.
     # Locally a setting; on AWS read from the running ECS task count (stage 5).
     router_replicas: int = 1
+    # Guards /_router/stats (it lists tenant ids). Without it, stats are switched off.
+    metrics_token: str | None = None
 
     @classmethod
     def from_env(cls) -> "RouterSettings":
@@ -66,6 +71,7 @@ class RouterSettings:
             cache_ttl_seconds=float(os.environ.get("ROUTE_CACHE_TTL_SECONDS", "5")),
             request_timeout_seconds=float(os.environ.get("REQUEST_TIMEOUT_SECONDS", "10")),
             router_replicas=int(os.environ.get("ROUTER_REPLICAS", "1")),
+            metrics_token=os.environ.get("ROUTER_METRICS_TOKEN") or None,
         )
 
 
@@ -104,6 +110,7 @@ def create_app(
     cache = RoutingCache(settings.cache_ttl_seconds, clock=clock)
     resolver = TenantResolver(http, settings.control_plane_url, settings.router_token, cache)
     limiter = rate_limiter or InMemoryRateLimiter(clock=clock, replicas=settings.router_replicas)
+    metering = Metering()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -117,6 +124,17 @@ def create_app(
     @app.get("/_router/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    if settings.metrics_token:
+        metrics_auth = TokenAuth({"metrics": settings.metrics_token})
+
+        @app.get("/_router/stats", dependencies=[metrics_auth.require("metrics")])
+        def stats() -> dict[str, Any]:
+            return {
+                "since": metering.since,
+                "router_replicas": settings.router_replicas,
+                "tenants": metering.snapshot(),
+            }
 
     async def forward(
         entry: RoutingEntry,
@@ -133,7 +151,8 @@ def create_app(
     @app.api_route("/{path:path}", methods=_METHODS, include_in_schema=False)
     async def proxy(request: Request) -> Response:
         raw_path: str = request.scope["path"]
-        if is_internal_path(raw_path):
+        if is_internal_path(raw_path) or _normalize(unquote(raw_path)).startswith("/_router/"):
+            # Cells' /internal API is never exposed; /_router/* is the router's own space.
             return error_response(404, "not_found", "Not Found")
 
         tenant_id = request.headers.get(TENANT_HEADER)
@@ -148,17 +167,26 @@ def create_app(
             return error_response(404, "unknown_tenant", "tenant not found")
         except RoutingUnavailableError:
             return error_response(503, "routing_unavailable", "routing unavailable", RETRY_AFTER)
+
+        # Only tenants the control plane knows are metered, so made-up ids can't grow it.
+        response, throttled = await serve(request, raw_path, tenant_id, entry)
+        metering.record(tenant_id, response.status_code, throttled=throttled)
+        return response
+
+    async def serve(
+        request: Request, raw_path: str, tenant_id: str, entry: RoutingEntry
+    ) -> tuple[Response, bool]:
+        """Limit and forward a request for a known tenant; returns (response, throttled)."""
         if entry.status != "active":
-            return error_response(503, "tenant_unavailable", "tenant unavailable", RETRY_AFTER)
+            return (
+                error_response(503, "tenant_unavailable", "tenant unavailable", RETRY_AFTER),
+                False,
+            )
 
         decision = limiter.check(tenant_id, entry.rate_limit) if entry.rate_limit else None
         if decision is not None and not decision.allowed:
-            return error_response(
-                429,
-                "rate_limited",
-                "tenant rate limit exceeded",
-                {**rate_limit_headers(decision), "Retry-After": str(decision.retry_after)},
-            )
+            limited = {**rate_limit_headers(decision), "Retry-After": str(decision.retry_after)}
+            return error_response(429, "rate_limited", "tenant rate limit exceeded", limited), True
 
         body = await request.body()
         path = _normalize(raw_path)
@@ -173,14 +201,18 @@ def create_app(
                 try:
                     fresh = await resolver.resolve(tenant_id, refresh=True)
                 except TenantNotFoundError:
-                    return error_response(404, "unknown_tenant", "tenant not found")
+                    return error_response(404, "unknown_tenant", "tenant not found"), False
                 except RoutingUnavailableError:  # pragma: no cover - cached entry exists here
                     fresh = entry
                 if fresh.cell_id == entry.cell_id or fresh.status != "active":
-                    return error_response(503, "routing_stale", "route is stale", RETRY_AFTER)
+                    stale = error_response(503, "routing_stale", "route is stale", RETRY_AFTER)
+                    return stale, False
                 upstream = await forward(fresh, request, path, body, headers)
         except httpx.HTTPError:
-            return error_response(502, "cell_unreachable", f"cell {entry.cell_id} is unreachable")
+            unreachable = error_response(
+                502, "cell_unreachable", f"cell {entry.cell_id} is unreachable"
+            )
+            return unreachable, False
 
         response = Response(content=upstream.content, status_code=upstream.status_code)
         for key, value in upstream.headers.multi_items():
@@ -188,6 +220,6 @@ def create_app(
                 response.headers.append(key, value)
         if decision is not None:
             response.headers.update(rate_limit_headers(decision))
-        return response
+        return response, False
 
     return app

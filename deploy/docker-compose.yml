@@ -64,6 +64,8 @@ services:
       ROUTER_TOKEN: ${ROUTER_TOKEN:-dev-router-token}
       # How many routers share the traffic; each enforces rate limit / replicas.
       ROUTER_REPLICAS: ${ROUTER_REPLICAS:-1}
+      # Guards /_router/stats (per-tenant usage); read by `cellctl usage`.
+      ROUTER_METRICS_TOKEN: ${ROUTER_METRICS_TOKEN:-dev-metrics-token}
     ports: ["127.0.0.1:8080:8000"]
     depends_on:
       control-plane: { condition: service_healthy }
@@ -77,6 +79,7 @@ services:
       CELL_ID: cell-1
       CELL_DB_PATH: /data/cell-1.db
       CELL_INTERNAL_TOKEN: ${CELL_1_TOKEN:-dev-cell-1-token}
+      MAX_CONCURRENT_REQUESTS: ${MAX_CONCURRENT_REQUESTS:-100}
     volumes: [cell-1-data:/data]
 
   cell-2:
@@ -85,6 +88,7 @@ services:
       CELL_ID: cell-2
       CELL_DB_PATH: /data/cell-2.db
       CELL_INTERNAL_TOKEN: ${CELL_2_TOKEN:-dev-cell-2-token}
+      MAX_CONCURRENT_REQUESTS: ${MAX_CONCURRENT_REQUESTS:-100}
     volumes: [cell-2-data:/data]
 
 volumes:
