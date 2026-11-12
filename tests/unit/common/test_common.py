@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -131,6 +133,12 @@ class TestErrorHandlers:
         body = response.json()
         assert body["error"] == "validation_error"
         assert body["details"]
+
+    def test_validation_errors_never_echo_the_input(self) -> None:
+        # Inputs can be secrets (e.g. a cell credential that is too short).
+        response = self.client.get("/items/secret-value-123")
+        assert "secret-value-123" not in json.dumps(response.json()["details"])
+        assert all("input" not in detail for detail in response.json()["details"])
 
     def test_unknown_route_uses_the_same_shape(self) -> None:
         response = self.client.get("/does-not-exist")

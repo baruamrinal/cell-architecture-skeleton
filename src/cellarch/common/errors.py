@@ -41,11 +41,16 @@ async def _api_error(request: Request, exc: Exception) -> Response:
 
 async def _validation_error(request: Request, exc: Exception) -> Response:
     assert isinstance(exc, RequestValidationError)  # noqa: S101
+    # Never echo submitted values back: they can be secrets (e.g. cell credentials).
+    details = [
+        {key: value for key, value in error.items() if key not in ("input", "ctx", "url")}
+        for error in exc.errors()
+    ]
     return JSONResponse(
         {
             "error": "validation_error",
             "message": "request validation failed",
-            "details": jsonable_encoder(exc.errors()),
+            "details": jsonable_encoder(details),
         },
         status_code=422,
     )

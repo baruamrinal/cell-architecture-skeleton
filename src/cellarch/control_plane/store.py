@@ -28,6 +28,11 @@ CREATE TABLE IF NOT EXISTS tenants (
     updated_at     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_tenants_cell ON tenants (cell_id);
+-- Decommissioned cells, so configuration seeding doesn't bring them back on restart.
+CREATE TABLE IF NOT EXISTS retired_cells (
+    cell_id    TEXT PRIMARY KEY,
+    retired_at TEXT NOT NULL
+);
 """
 
 _CELLS_WITH_LOAD = """
@@ -66,18 +71,32 @@ class ControlPlaneStore:
                     "wave, created_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)",
                     (cell_id, url, type, hosting, size, capacity, wave, utcnow()),
                 )
+                conn.execute("DELETE FROM retired_cells WHERE cell_id = ?", (cell_id,))
         except sqlite3.IntegrityError as exc:
             raise DuplicateError(cell_id) from exc
         return self._require_cell(cell_id)
 
     def seed_cell(self, cell_id: str, url: str, capacity: int) -> None:
-        """Register a cell from configuration without overwriting admin changes."""
+        """Register a cell from configuration without overwriting admin changes.
+
+        Cells that were decommissioned are not brought back.
+        """
         with connect(self._db_path) as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO cells (cell_id, url, type, hosting, size, status, "
                 "capacity, wave, created_at) "
-                "VALUES (?, ?, 'shared', 'vendor', 'small', 'active', ?, 1, ?)",
-                (cell_id, url, capacity, utcnow()),
+                "SELECT ?, ?, 'shared', 'vendor', 'small', 'active', ?, 1, ? "
+                "WHERE NOT EXISTS (SELECT 1 FROM retired_cells WHERE cell_id = ?)",
+                (cell_id, url, capacity, utcnow(), cell_id),
+            )
+
+    def delete_cell(self, cell_id: str) -> None:
+        """Remove a cell (the caller checks it hosts no tenants) and remember it as retired."""
+        with connect(self._db_path) as conn:
+            conn.execute("DELETE FROM cells WHERE cell_id = ?", (cell_id,))
+            conn.execute(
+                "INSERT OR REPLACE INTO retired_cells (cell_id, retired_at) VALUES (?, ?)",
+                (cell_id, utcnow()),
             )
 
     def get_cell(self, cell_id: str) -> dict[str, Any] | None:
