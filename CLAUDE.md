@@ -13,7 +13,7 @@ Stage 1 (core platform) implemented: cell, control plane, router, `cellctl`, Doc
 - **Plan before code.** Propose the approach for a stage or a significant change and get agreement before writing code.
 - **Test-driven development (docs/plan.md §14).** Red → green → refactor for every behavior:
   - Never write production code without a failing test first. Run the test and see it fail before implementing.
-  - Each stage starts with acceptance tests taken from the plan.
+  - Each stage starts with acceptance tests taken from the plan. Add each criterion to `docs/acceptance-criteria.md` and its `test_<id>_…` test in the same PR (a traceability test enforces it).
   - Bug fixes start with a test that reproduces the bug.
   - This applies to Terraform too (`terraform test`, Checkov policy checks).
 - **Cost-effective by default.** Prefer options with no fixed cost: scale to zero, nothing extra per cell, shared non-request-path services. Call out the cost impact of any new infrastructure.
