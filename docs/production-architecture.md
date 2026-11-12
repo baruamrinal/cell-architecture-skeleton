@@ -6,19 +6,20 @@ How the local skeleton becomes an enterprise production platform on AWS. The **d
 
 | Concern | Local skeleton | Production (AWS) | Status |
 |---|---|---|---|
-| Entry point | Router container on `localhost:8080` | Router on **ECS Fargate (Graviton)** in **3 availability zones**, behind an **ALB** with **AWS WAF**; TLS via ACM, DNS via Route 53; autoscaled | Router built; AWS planned (stage 5) |
-| Control plane | One container, SQLite | ECS service in private subnets with its own **multi-AZ Aurora PostgreSQL**; admin API only via **API Gateway + IAM**; break-glass via SSM Session Manager | Built locally; AWS planned (5) |
-| Cell | Gateway + Postgres + tenant containers on a Docker network | One network boundary per cell: gateway as a multi-AZ ECS service, **its own Aurora Serverless v2 cluster**, tenant services as ECS services | Gateway: stage 2.5; AWS planned (5) |
-| Tenant services | Two containers per tenant (`user-account`, `order-processing`) with CPU/memory caps | **Two ECS services per tenant**, sized by tier, autoscaled, each with **its own IAM role** | Stage 2.5; AWS planned (5) |
+| Clusters | k3d: a platform cluster + **one cluster per cell** | EKS: a platform cluster + **one EKS cluster per cell** (Graviton, Karpenter), never shared between cells | Stage 2.6 locally; EKS planned (5) |
+| Entry point | Router in the local platform cluster on `localhost:8080` | Router in the **platform EKS cluster** across **3 availability zones**, behind an **ALB** with **AWS WAF**; TLS via ACM, DNS via Route 53; autoscaled | Router built; EKS planned (5) |
+| Control plane | Platform cluster (locally), SQLite | Deployment in the platform EKS cluster with its own **multi-AZ Aurora PostgreSQL**; admin API only via **API Gateway + IAM**; break-glass via SSM Session Manager | Built locally; AWS planned (5) |
+| Cell | Its own k3d cluster: gateway + the cell's Postgres + tenant stacks | **Its own EKS cluster** and network boundary: gateway (multi-AZ, behind an internal NLB), **its own Aurora Serverless v2 cluster**, tenant stacks as Helm releases | Gateway: stage 2.5; cluster per cell: 2.6 / 5 |
+| Tenant services | A `tenant-stack` Helm release per tenant: `user-account` + `order-processing` with CPU/memory limits by tier | The same Helm release in the cell's EKS cluster: autoscaled, **its own service account and IAM role** (IRSA), network policy | Stage 2.5 / 2.6; AWS planned (5) |
 | Tenant data | One database per tenant on the cell's Postgres container; schema + login per service | One database per tenant in the **cell's Aurora cluster** (never shared across cells); schema + login per service; KMS encryption; point-in-time recovery | Stage 2.5; AWS planned (5) |
 | Control plane data | SQLite | Aurora PostgreSQL (multi-AZ) | Planned (5) |
-| Secrets | `.env`, generated compose files (git-ignored) | **Secrets Manager / SSM Parameter Store** (KMS), automatic rotation, read only by the owning IAM role | Interfaces built; AWS planned (5) |
+| Secrets | `.env` and Kubernetes secrets created at onboarding (git-ignored) | **Secrets Manager** (KMS) synced into each cluster by **External Secrets Operator**, automatic rotation, readable only by the owning service account | Interfaces built; AWS planned (5) |
 | Service identity | Role-scoped shared tokens | **IAM / workload identity**; **mTLS** between router, gateway and services; security groups allow only expected paths | Planned (5) |
-| Tenant onboarding (containers) | `cellctl` starts containers through Docker | **Deployment pipeline** (GitHub Actions + Terraform) creates the tenant's ECS services, triggered by the control plane | Stage 2.5 locally; pipeline planned (6) |
-| New cell | `cellctl cells deploy` | **`cell-lifecycle.yml` + Terraform**: a new module instance = new network, gateway and **new Aurora cluster** | Local built; pipeline planned (6) |
+| Tenant onboarding (containers) | `cellctl` installs the tenant's Helm release in its cell's cluster | **GitOps:** the tenant's values file is committed, **Argo CD** installs the release in the cell's cluster, the control plane activates the tenant (a tenant operator later) | Stage 2.6 locally; Argo CD planned (6) |
+| New cell | `cellctl cells deploy` creates a new k3d cluster and installs the `cell` chart | **`cell-lifecycle.yml` + Terraform**: a new module instance = new network, **new EKS cluster** and **new Aurora cluster**; Argo CD installs the `cell` chart | Local built; pipeline planned (6) |
 | Shared rate limiter | Redis container (opt-in profile) | **ElastiCache (Redis/Valkey)**, multi-AZ; still fails open | Built locally; AWS planned (5) |
 | Usage metering | In-memory counters, `cellctl usage` | **OpenTelemetry metrics → CloudWatch**, dashboards per cell and tenant | Counters built; export planned (5) |
-| Releases | `make up` rebuilds everything | **Cell-by-cell waves**: canary cell, bake time, alarm checks, automatic rollback per wave | Planned (6) |
+| Releases | `make up` rebuilds and re-installs the charts | **Argo CD ApplicationSets, cell by cell**: canary cell cluster, bake time, alarm checks, automatic rollback per wave. Kubernetes upgrades also roll out cell by cell | Planned (6) |
 | Images | Built locally / in CI | Built once in CI, **scanned (Trivy)** and **signed**, stored in **ECR**, base images pinned and kept current by Dependabot | Pinning + Dependabot built; signing planned (6) |
 | Customer-hosted cells | — | Cell in the customer's AWS account over **PrivateLink** | Planned (7) |
 
@@ -31,7 +32,8 @@ How the local skeleton becomes an enterprise production platform on AWS. The **d
   | A failure in… | …affects |
   |---|---|
   | A tenant's services | That tenant only |
-  | A cell | That cell's tenants only |
+  | A cell, including its Kubernetes cluster (bad upgrade, add-on or DNS failure) | That cell's tenants only |
+  | The platform cluster | Routing of new requests (router); cells keep running, and a multi-region router is on the roadmap |
   | The control plane | Onboarding and changes only; live traffic is unaffected |
 
 - **Load shedding:**
@@ -76,7 +78,7 @@ Targets are design goals, to be validated with restore drills (runbook in stage 
 - **Traces:** OpenTelemetry across router → gateway → tenant services, to X-Ray.
 - **Metrics:** request rate, errors and latency per cell and per tenant; throttles; cell request-cap rejections; database connections per tenant.
 - **Dashboards and alarms:** one dashboard per cell. Alarms feed the release waves and on-call.
-- **Health:** `/healthz` (alive) and `/readyz` (dependencies OK) on every component, used by load balancers and ECS.
+- **Health:** `/healthz` (alive) and `/readyz` (dependencies OK) on every component, used by load balancers and Kubernetes liveness/readiness probes.
 
 ## 7. Cost management
 

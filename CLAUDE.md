@@ -6,7 +6,7 @@ Reference implementation of cell-based architecture for a multi-tenant SaaS plat
 
 ## Status
 
-Stage 1 (core platform) implemented: cell, control plane, router, `cellctl`, Dockerfile, compose, demo. Work proceeds in the delivery stages in docs/plan.md §13, one stage at a time.
+Stages 1 and 2 implemented (core platform, traffic protection) on Docker Compose. Next: stage 2.5 (per-tenant services) and 2.6 (Kubernetes + Helm, cluster per cell). Work proceeds in the delivery stages in docs/plan.md §13, one stage at a time.
 
 ## Working agreements
 
@@ -38,7 +38,7 @@ If a change can't meet one of these, say so in the PR and record it in the decis
 
 1. **Control plane vs data plane.** The control plane (`src/cellarch/control_plane/`) is never on the request path. The data plane (`src/cellarch/data_plane/router/`, `src/cellarch/data_plane/cell/`) must keep serving when the control plane is down (cached routes, cells know their own tenants).
 2. **One tenant lives in exactly one cell.** Routing is `tenant_id → cell`. Splitting one tenant across cells (sharding) is out of scope.
-3. **Cells share nothing on the request path.** Each cell has its own database. No cell-to-cell calls.
+3. **Cells share nothing that can fail together.** Each cell has its own database server **and its own Kubernetes cluster**; the router and control plane run in a separate platform cluster. No cell-to-cell calls. Never put two cells in one cluster, not even as namespaces.
 4. **Tenant isolation.** Every query goes through the tenant-scoped data-access layer, with Postgres row-level security as a second line on AWS. A cell rejects tenants it doesn't host (`421`). Any change touching data access needs a cross-tenant test.
 5. **All cells come from one module.** No hand-built or snowflake cells. Shared, dedicated, seasonal and customer-hosted cells differ only in inputs (`cells.yaml`).
 6. **Account-agnostic infrastructure.** Terraform modules take account, region and assume-role as inputs, so a cell can be deployed into a customer's AWS account.
@@ -51,7 +51,8 @@ If a change can't meet one of these, say so in the PR and record it in the decis
 
 - Python 3.12, FastAPI, httpx, pydantic, pytest + pytest-cov (branch coverage ≥ 90% gate).
 - SQLite locally, Aurora Serverless v2 PostgreSQL on AWS, behind the same storage interface.
-- AWS: ECS Fargate (Graviton), ALB (router only), Service Connect, PrivateLink (customer cells), SSM Parameter Store, CloudWatch + OpenTelemetry. ElastiCache is optional, behind a flag.
+- Runtime: Kubernetes. EKS in production (one cluster per cell + a platform cluster, Graviton, Karpenter), k3d locally. Delivery: Helm charts + Argo CD (GitOps, cell-by-cell waves).
+- AWS: ALB (router only), internal NLB per cell, Aurora Serverless v2 (one cluster per cell), Secrets Manager + External Secrets, PrivateLink (customer cells), CloudWatch + OpenTelemetry. ElastiCache optional, behind a flag.
 - Terraform/OpenTofu ≥ 1.10 (S3 backend, native locking). GitHub Actions with OIDC; no long-lived keys.
 
 ## Layout (planned)
