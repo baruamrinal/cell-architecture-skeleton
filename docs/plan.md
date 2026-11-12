@@ -439,6 +439,7 @@ All code, application and infrastructure, is written test-first.
 - Each stage **starts with acceptance tests** taken from this plan's behaviors (e.g. "a tenant on a frozen cell can read but not write"). They are written first and fail until the stage is done.
 - Inside that, unit-level TDD drives each module (placement, token bucket, cache, move steps, scheduler states).
 - A stage is done when its acceptance tests pass.
+- Criteria are listed in plain language in [acceptance-criteria.md](acceptance-criteria.md), one ID per criterion matching a `test_<id>_…` acceptance test. `tests/acceptance/test_traceability.py` fails CI if the two drift apart.
 
 ### 14.3 Test layers
 
