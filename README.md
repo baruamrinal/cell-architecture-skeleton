@@ -239,6 +239,27 @@ Warnings:
 
 Either one means it's time for `cells deploy` or `cells set-capacity`.
 
+### Usage per tenant
+
+```powershell
+cellctl usage
+```
+```text
+Usage since 2026-11-12T10:00:00+00:00 (this router; 1 replica(s))
+
+TENANT  REQUESTS  THROTTLED  2XX  4XX  5XX
+acme    120       30 (25%)   85   34   1
+globex  4         0 (0%)     4    0    0
+```
+- **What's counted:** the router counts each tenant's requests, how many were throttled, and the responses by class, busiest tenant first. Counters reset when the router restarts.
+- **What to do with it:** a tenant that's throttled a lot is a candidate for a higher limit or, from stage 3, a dedicated cell.
+- **Access:** `cellctl usage` reads the router's stats with the **metrics token**, not the admin token. It takes `ROUTER_METRICS_TOKEN` from `.env`, or `--metrics-token` / `CELLCTL_METRICS_TOKEN`. If your `.env` predates this feature, add `ROUTER_METRICS_TOKEN=dev-metrics-token` (see `.env.example`).
+- **Raw JSON:** available at `http://localhost:8080/_router/stats` with header `X-Internal-Token: <metrics token>`.
+
+### Cell overload protection
+
+Each cell handles at most `MAX_CONCURRENT_REQUESTS` requests at once (default 100). Beyond that, it rejects new requests **immediately** with `503 cell_overloaded` and `Retry-After: 1`, instead of queueing them. That way a spike can't pile up and take the cell down. Health checks are exempt. This backs up the router's per-tenant rate limits.
+
 ### Errors and exit codes
 
 | Error | Meaning |
@@ -251,6 +272,8 @@ Either one means it's time for `cells deploy` or `cells set-capacity`.
 | `missing_cell_credential` | Registering without `--credential` for a cell whose credential isn't configured. |
 | `cell_unreachable` / `cell_id_mismatch` / `cell_credential_rejected` | The cell failed the checks done before it is registered. |
 | `validation_error` | An ID or option isn't valid. |
+| `rate_limited` | (tenant API, `429`) The tenant is over its rate limit; retry after `Retry-After` seconds. |
+| `cell_overloaded` | (tenant API, `503`) The tenant's cell is at its request cap; retry shortly. |
 
 - **Output:** lists print as tables; single records as JSON; progress messages go to stderr.
 - **Exit codes:**

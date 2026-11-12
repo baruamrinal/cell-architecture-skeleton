@@ -14,6 +14,7 @@ from cellarch.common.errors import ApiError, install_error_handlers
 from cellarch.common.headers import CELL_HEADER, TENANT_HEADER
 from cellarch.common.logging import configure_logging
 from cellarch.common.security import TokenAuth
+from cellarch.data_plane.cell.concurrency import ConcurrencyLimit
 from cellarch.data_plane.cell.store import CellStore
 
 CONTROL_PLANE_ROLE = "control-plane"
@@ -24,6 +25,8 @@ class CellSettings:
     cell_id: str
     db_path: str
     internal_token: str
+    # Requests handled at once; more are rejected with 503 cell_overloaded.
+    max_concurrent_requests: int = 100
 
     @classmethod
     def from_env(cls) -> "CellSettings":
@@ -32,6 +35,7 @@ class CellSettings:
             cell_id=cell_id,
             db_path=os.environ.get("CELL_DB_PATH", f"./data/{cell_id}.db"),
             internal_token=require_env("CELL_INTERNAL_TOKEN"),
+            max_concurrent_requests=int(os.environ.get("MAX_CONCURRENT_REQUESTS", "100")),
         )
 
 
@@ -70,6 +74,11 @@ def create_app(settings: CellSettings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.store = store
     install_error_handlers(app)
+    app.add_middleware(
+        ConcurrencyLimit,
+        max_concurrent=settings.max_concurrent_requests,
+        cell_id=settings.cell_id,
+    )
 
     @app.middleware("http")
     async def stamp_cell_id(

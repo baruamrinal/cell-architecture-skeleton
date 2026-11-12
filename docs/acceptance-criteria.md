@@ -71,4 +71,11 @@ What each delivery stage must do, in plain language. The precise, executable ver
 | A36 | a router configured as one of 2 router replicas | a tenant with a burst of 4 sends requests | that router allows half (2), so all routers together stay within the limit |
 | A37 | any request the router forwards | the response comes back | it carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset` |
 
+### Usage metering and cell request cap
+
+| ID | Given | When | Then |
+|---|---|---|---|
+| A38 | tenants sending requests through the router, some throttled | the router's usage stats are read | each known tenant's requests, throttled requests and responses by class (2xx/4xx/5xx) are counted; unknown tenant IDs are not tracked; reading stats needs the router's metrics token |
+| A39 | a cell already handling its maximum number of requests at once | another request arrives | it is rejected immediately with `503 cell_overloaded` and `Retry-After`, while `/healthz` still answers |
+
 Stage 1 also has a demo acceptance check: `scripts/demo.py` runs end-to-end against the in-process platform (`tests/acceptance/test_demo.py`) and against the real compose stack in CI (`compose-smoke`).

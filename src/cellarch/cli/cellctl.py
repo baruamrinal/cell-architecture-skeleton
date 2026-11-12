@@ -49,6 +49,7 @@ from cellarch.common.dotenv import load_env_file
 from cellarch.common.headers import ACTOR_HEADER, INTERNAL_TOKEN_HEADER
 
 DEFAULT_URL = "http://localhost:8000"
+DEFAULT_ROUTER_URL = "http://localhost:8080"
 _UNSAFE_ACTOR_CHARS = re.compile(r"[^A-Za-z0-9._@-]+")
 DEFAULT_COMPOSE_FILE = "deploy/docker-compose.yml"
 EXIT_OK, EXIT_ERROR, EXIT_USAGE = 0, 1, 2
@@ -125,6 +126,8 @@ def _settings() -> dict[str, str]:
     settings.update({k: v for k, v in os.environ.items() if k.startswith("CELLCTL_")})
     if not settings.get("CELLCTL_TOKEN") and file_values.get("ADMIN_TOKEN"):
         settings["CELLCTL_TOKEN"] = file_values["ADMIN_TOKEN"]
+    if not settings.get("CELLCTL_METRICS_TOKEN") and file_values.get("ROUTER_METRICS_TOKEN"):
+        settings["CELLCTL_METRICS_TOKEN"] = file_values["ROUTER_METRICS_TOKEN"]
     return settings
 
 
@@ -139,6 +142,16 @@ def _parser(settings: Mapping[str, str]) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cellctl", description="Control plane admin CLI")
     parser.add_argument("--url", default=settings.get("CELLCTL_URL", DEFAULT_URL))
     parser.add_argument("--token", default=settings.get("CELLCTL_TOKEN"))
+    parser.add_argument(
+        "--router-url",
+        default=settings.get("CELLCTL_ROUTER_URL", DEFAULT_ROUTER_URL),
+        help=f"router address for `usage` (default {DEFAULT_ROUTER_URL})",
+    )
+    parser.add_argument(
+        "--metrics-token",
+        default=settings.get("CELLCTL_METRICS_TOKEN"),
+        help="router metrics token for `usage` (default: ROUTER_METRICS_TOKEN from .env)",
+    )
     parser.add_argument(
         "--actor",
         default=settings.get("CELLCTL_ACTOR"),
@@ -210,6 +223,7 @@ def _parser(settings: Mapping[str, str]) -> argparse.ArgumentParser:
     set_limit.add_argument("--clear", action="store_true", help="remove the override")
 
     resources.add_parser("status", help="platform capacity overview and warnings")
+    resources.add_parser("usage", help="per-tenant request usage, from the router")
     return parser
 
 
@@ -425,12 +439,53 @@ def _render(args: argparse.Namespace, data: Any) -> str:
     return _table([header, *rows])
 
 
+def _usage_table(data: dict[str, Any]) -> str:
+    lines = [f"Usage since {data['since']} (this router; {data['router_replicas']} replica(s))", ""]
+    if not data["tenants"]:
+        return "\n".join([*lines, "No tenant traffic yet."])
+    rows = [["TENANT", "REQUESTS", "THROTTLED", "2XX", "4XX", "5XX"]]
+    for t in data["tenants"]:
+        share = round(100 * t["throttled"] / t["requests"]) if t["requests"] else 0
+        responses = t["responses"]
+        rows.append(
+            [
+                t["tenant_id"],
+                str(t["requests"]),
+                f"{t['throttled']} ({share}%)",
+                str(responses["2xx"]),
+                str(responses["4xx"]),
+                str(responses["5xx"]),
+            ]
+        )
+    return "\n".join([*lines, _table(rows)])
+
+
+def _usage(args: argparse.Namespace, router_client: httpx.Client | None) -> int:
+    if not args.metrics_token:
+        print(
+            "error: set CELLCTL_METRICS_TOKEN, pass --metrics-token, "
+            "or add ROUTER_METRICS_TOKEN to .env",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    api = Api(router_client or make_client(args.router_url), args.metrics_token)
+    try:
+        data = api.call("GET", "/_router/stats")
+    except CommandError as exc:
+        status = f" (HTTP {exc.status})" if exc.status else ""
+        print(f"error: {exc.code}: {exc.message}{status}", file=sys.stderr)
+        return EXIT_ERROR
+    print(_usage_table(data))
+    return EXIT_OK
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
     client: httpx.Client | None = None,
     token: str | None = None,
     docker: DockerRunner | None = None,
+    router_client: httpx.Client | None = None,
 ) -> int:
     try:
         settings = _settings()
@@ -443,6 +498,9 @@ def main(
         has_values = args.rps is not None or args.burst is not None
         if args.clear == has_values or (has_values and (args.rps is None or args.burst is None)):
             parser.error("set-limit needs both --rps and --burst, or --clear on its own")
+
+    if args.resource == "usage":  # served by the router, with its metrics token
+        return _usage(args, router_client)
 
     token = token or args.token
     if not token:
