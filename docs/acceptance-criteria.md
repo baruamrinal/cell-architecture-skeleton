@@ -41,4 +41,11 @@ What each delivery stage must do, in plain language. The precise, executable ver
 | A23 | a deployed container that never becomes healthy | `cellctl cells deploy` runs | the container and its generated file are removed and nothing is registered (exit code `1`) |
 | A24 | a cell deployed with `cellctl` and no tenants | `cellctl cells decommission <cell-id> --delete-data` is run | it is deregistered, its container stopped and its data volume removed |
 
+### Who created and changed what
+
+| ID | Given | When | Then |
+|---|---|---|---|
+| A25 | admin calls that name the caller (`X-Actor`, sent by `cellctl`) | a cell or tenant is created, then changed | `created_by` / `updated_by` record `admin:<name>` (or `admin` without a name) and `updated_at` moves on |
+| A26 | the admin API | the caller name has spaces, symbols, non-ASCII characters or is over 64 characters | the request is rejected with `400 invalid_actor` |
+
 Stage 1 also has a demo acceptance check: `scripts/demo.py` runs end-to-end against the in-process platform (`tests/acceptance/test_demo.py`) and against the real compose stack in CI (`compose-smoke`).
