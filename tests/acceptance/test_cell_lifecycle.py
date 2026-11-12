@@ -121,6 +121,7 @@ def test_a21_status_summarises_capacity_and_warns_before_it_runs_out(platform: P
         "tenants": 3,
         "capacity": 4,
         "free_slots": 1,
+        "isolated_tenants": 3,  # tenants are isolated by default
     }
     assert past_target["target_utilization"] == 0.75
     assert [w["code"] for w in past_target["warnings"]] == ["capacity_low"]

@@ -93,7 +93,7 @@ class Platform:
 
     def start_cell(self, cell_id: str, token: str) -> None:
         """Start a real cell app in a spare address slot (what `docker compose up` does)."""
-        settings = CellSettings(cell_id, str(self.tmp_path / f"{cell_id}.db"), token)
+        settings = CellSettings(cell_id, str(self.tmp_path / cell_id / f"{cell_id}.db"), token)
         self.cells[cell_id].app = create_cell(settings)
         self.cells[cell_id].reachable = True
 
@@ -137,7 +137,7 @@ def platform(tmp_path: Path) -> Iterator[Platform]:
             create_cell(
                 CellSettings(
                     cell_id=cell_id,
-                    db_path=str(tmp_path / f"{cell_id}.db"),
+                    db_path=str(tmp_path / cell_id / f"{cell_id}.db"),  # own folder, like a volume
                     internal_token=token,
                 )
             )
