@@ -27,4 +27,18 @@ What each delivery stage must do, in plain language. The precise, executable ver
 | A14 | the control plane | admin and routing APIs are called with missing, wrong or the router credential | missing/wrong → `401`; router credential on admin APIs → `403`; routing API accepts router and admin credentials |
 | A15 | the chosen cell can't set up the tenant | a tenant is onboarded | the API returns `502 provisioning_failed` and no tenant record is left behind |
 
+### Cell lifecycle commands (stage 1 extension)
+
+| ID | Given | When | Then |
+|---|---|---|---|
+| A16 | a running cell the control plane has no credential for | it is registered through the API with its credential | it is accepted without restarting the control plane, and tenants can be placed on and served by it |
+| A17 | a cell being registered | it is unreachable, reports a different cell ID, or rejects the credential | registration fails with `422 cell_unreachable`, `cell_id_mismatch` or `cell_credential_rejected`, and nothing is registered |
+| A18 | a cell registered with a credential | cells, a cell or the status are read, or registration fails validation | the credential never appears in any response, including validation errors |
+| A19 | a cell hosting 2 tenants | its capacity is set below 2, or raised | lowering below the tenant count fails with `409 capacity_below_tenants`; raising succeeds |
+| A20 | one cell with tenants and one without | each is decommissioned | the cell with tenants is refused (`409 cell_not_empty`); the empty cell and its credential are removed |
+| A21 | cells filling up | the platform status is read | it shows totals (cells, placeable cells, tenants, capacity, free slots) and warns `capacity_low` past the 75% target and `no_capacity` when full |
+| A22 | the local Docker stack | `cellctl cells deploy <cell-id>` is run | a container is started with a generated credential, registered, and ready for tenants in one step |
+| A23 | a deployed container that never becomes healthy | `cellctl cells deploy` runs | the container and its generated file are removed and nothing is registered (exit code `1`) |
+| A24 | a cell deployed with `cellctl` and no tenants | `cellctl cells decommission <cell-id> --delete-data` is run | it is deregistered, its container stopped and its data volume removed |
+
 Stage 1 also has a demo acceptance check: `scripts/demo.py` runs end-to-end against the in-process platform (`tests/acceptance/test_demo.py`) and against the real compose stack in CI (`compose-smoke`).

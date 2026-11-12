@@ -12,6 +12,8 @@ from cellarch.control_plane.app import ControlPlaneSettings, create_app
 from cellarch.control_plane.cell_client import CellClient, MissingCellCredentialError
 from cellarch.control_plane.store import ControlPlaneStore, DuplicateError
 
+from .test_cell_lifecycle_unit import fake_cells
+
 
 def test_cell_client_refuses_cells_without_credentials() -> None:
     import asyncio
@@ -113,6 +115,7 @@ class TestStore:
 
 
 def make_client(tmp_path: Path, transport: httpx.AsyncBaseTransport | None = None) -> TestClient:
+    transport = transport or httpx.MockTransport(fake_cells({"cell-1": "c1", "cell-2": "c2"}))
     app = create_app(
         ControlPlaneSettings(
             db_path=str(tmp_path / "cp.db"),
@@ -122,7 +125,7 @@ def make_client(tmp_path: Path, transport: httpx.AsyncBaseTransport | None = Non
             seed_cells={"cell-2": "http://cell-2"},
             default_cell_capacity=7,
         ),
-        http_client=httpx.AsyncClient(transport=transport) if transport else None,
+        http_client=httpx.AsyncClient(transport=transport),
     )
     return TestClient(app, headers={INTERNAL_TOKEN_HEADER: ADMIN})
 

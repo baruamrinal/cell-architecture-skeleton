@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# cellctl-generated compose files for deployed cells (contain cell credentials)
+deploy/cells/

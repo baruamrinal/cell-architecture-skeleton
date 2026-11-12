@@ -12,6 +12,8 @@ from cellarch.cli.cellctl import main
 from cellarch.common.headers import INTERNAL_TOKEN_HEADER
 from cellarch.control_plane.app import ControlPlaneSettings, create_app
 
+from ..control_plane.test_cell_lifecycle_unit import fake_cells
+
 ADMIN = "admin-t"
 
 
@@ -25,7 +27,9 @@ def control_plane(tmp_path: Path) -> Iterator[TestClient]:
             cell_credentials={"cell-1": "c1"},
         ),
         http_client=httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda r: httpx.Response(201, json={}))
+            transport=httpx.MockTransport(
+                fake_cells({"cell-1": "c1", "cell-3": "cell-3-credential-0123"})
+            )
         ),
     )
     with TestClient(app, base_url="http://cp") as client:

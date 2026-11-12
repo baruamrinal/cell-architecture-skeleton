@@ -51,34 +51,104 @@ Stop and remove everything with `docker compose -f deploy/docker-compose.yml dow
 
 ## Admin CLI (`cellctl`)
 
-`cellctl` manages tenants and cells through the control plane's admin API. It's installed into the virtual environment by `pip install -e ".[dev]"`.
+`cellctl` covers the whole lifecycle: deploying and managing **cells**, and onboarding and managing **tenants**. It's installed into the virtual environment by `pip install -e ".[dev]"`.
 
 ### Setup
 
 ```powershell
-.venv\Scripts\Activate.ps1                 # or call it by path: .venv\Scripts\cellctl
-$env:CELLCTL_TOKEN = "dev-admin-token"     # admin credential (local development default)
-$env:CELLCTL_URL   = "http://localhost:8000"   # optional; this is the default
+.venv\Scripts\Activate.ps1                     # or call it by path: .venv\Scripts\cellctl
+$env:CELLCTL_TOKEN = "dev-admin-token"         # admin credential (local development default)
 ```
 
-Both settings can also be passed per command: `cellctl --url http://localhost:8000 --token <token> tenants list`.
+Run `cellctl` from the repo root. Optional settings (each also has a command-line flag):
+
+| Setting | Flag | Default |
+|---|---|---|
+| `CELLCTL_URL` | `--url` | `http://localhost:8000` (control plane admin API) |
+| `CELLCTL_TOKEN` | `--token` | none; required |
+| `CELLCTL_COMPOSE_FILE` | `--compose-file` | `deploy/docker-compose.yml` (used by `cells deploy` / `decommission`) |
 
 If `cellctl` is "not recognized", the virtual environment isn't active in that terminal. If activation fails with "running scripts is disabled", run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
 
-### Tenant commands
+### Commands at a glance
 
-| Command | What it does |
-|---|---|
-| `cellctl tenants create <tenant-id> [--name NAME] [--tier standard\|premium]` | Onboard a tenant: the control plane picks a cell (fill-first), sets the tenant up there and returns the record. `--name` defaults to the tenant ID; `--tier` defaults to `standard`. |
-| `cellctl tenants list` | List all tenants with their tier, cell and status. |
-| `cellctl tenants get <tenant-id>` | Show one tenant's full record as JSON. |
+```text
+CELL LIFECYCLE
+  cellctl cells deploy <cell-id> [--capacity N] [--type T] [--size S] [--wave N] [--image I]
+  cellctl cells list
+  cellctl cells get <cell-id>
+  cellctl cells set-status <cell-id> active|draining|disabled
+  cellctl cells set-capacity <cell-id> <N>
+  cellctl cells decommission <cell-id> [--delete-data]
+  cellctl cells register <cell-id> <url> [--credential C] [--capacity N] [--type T] [--size S] [--wave N]
 
-Tenant IDs are 2–63 characters: lowercase letters, digits and hyphens, starting with a letter or digit (for example `acme`, `acme-eu`, `t-42`).
+TENANT LIFECYCLE
+  cellctl tenants create <tenant-id> [--name NAME] [--tier standard|premium]
+  cellctl tenants list
+  cellctl tenants get <tenant-id>
 
-**Examples**
+OVERVIEW
+  cellctl status
+```
+
+Every command has `--help`, e.g. `cellctl cells deploy --help`.
+
+### Cell lifecycle: deploy → manage → decommission
+
+**1. Deploy a new cell** (local Docker stack running):
 ```powershell
-cellctl tenants create acme --name "Acme Corp" --tier premium
-cellctl tenants create globex
+cellctl cells deploy cell-4 --capacity 10
+```
+In one step this:
+1. generates a random credential for the cell;
+2. starts a `cell-4` container on the stack's network;
+3. waits until the cell is healthy;
+4. registers it with the control plane.
+
+No restart and no hand-edited files are needed. The control plane checks the new cell before accepting it: it must be healthy, report the right cell ID, and accept the credential. If any step fails, the container is removed again and nothing is registered.
+
+| Option | Meaning | Default |
+|---|---|---|
+| `cell-id` | Unique name: 2–63 lowercase letters, digits or hyphens. | — |
+| `--capacity` | Maximum tenants on the cell. Fill-first places tenants up to 75% of it, then uses the remaining room. | Control plane's `DEFAULT_CELL_CAPACITY` (4 locally) |
+| `--type` | `shared` for many tenants; `dedicated` is reserved for one tenant and never used for pooled placement. | `shared` |
+| `--size` | `small`, `medium` or `large`. A label for now; maps to AWS sizes in stage 5. | `small` |
+| `--wave` | Release wave for cell-by-cell rollouts (stage 6); `0` is the canary. | `1` |
+| `--image` | Container image for the cell. | `cellarch:dev` (built by `docker compose up --build`) |
+
+The generated compose file is kept in `deploy/cells/<cell-id>.yml`. It contains the cell's credential and is git-ignored.
+
+**2. Manage cells**
+```powershell
+cellctl cells list                         # tenants, capacity and utilization per cell
+cellctl cells get cell-4
+cellctl cells set-capacity cell-4 20       # can't go below the cell's current tenant count
+cellctl cells set-status cell-4 draining   # no new tenants; existing ones keep working
+cellctl cells set-status cell-4 active
+```
+
+**3. Decommission a cell**
+```powershell
+cellctl cells decommission cell-4                 # deregister + remove the container, keep its data
+cellctl cells decommission cell-4 --delete-data   # also delete its data volume
+```
+Decommissioning is refused while the cell still hosts tenants (`cell_not_empty`). Moving tenants off a cell arrives in stage 3. For cells not deployed by `cellctl`, such as `cell-1` and `cell-2` from the compose file, only the registration is removed; stop their containers yourself.
+
+**Registering a cell deployed some other way** (advanced): if you started a cell yourself, register it with its credential, which is the cell's `CELL_INTERNAL_TOKEN`. The cell's `url` is the address the control plane and router use, e.g. `http://cell-5:8000`, not `localhost`.
+```powershell
+cellctl cells register cell-5 http://cell-5:8000 --credential <the-cell's-token> --capacity 10
+```
+[deploy/cell-3.override.yml](deploy/cell-3.override.yml) is a hand-written example of such a cell. Its credential is in the control plane's configuration, so `--credential` isn't needed for it:
+```powershell
+docker compose -f deploy/docker-compose.yml -f deploy/cell-3.override.yml up -d --wait
+cellctl cells register cell-3 http://cell-3:8000 --capacity 4
+```
+
+### Tenant lifecycle
+
+```powershell
+cellctl tenants create acme --name "Acme Corp" --tier premium   # placed on a cell automatically
+cellctl tenants create globex                                   # name defaults to the ID
 cellctl tenants list
 cellctl tenants get acme
 ```
@@ -89,69 +159,49 @@ acme    Acme Corp  premium   cell-1  active
 globex  globex     standard  cell-1  active
 ```
 
-**Possible errors when creating a tenant**
+Tenant IDs are 2–63 characters: lowercase letters, digits and hyphens, starting with a letter or digit (for example `acme`, `acme-eu`, `t-42`). `--tier` defaults to `standard`.
+
+Moving tenants between cells (stage 3) and seasonal schedules (stage 4) will be added here.
+
+### Platform overview
+
+```powershell
+cellctl status
+```
+```text
+Target utilization: 75%
+Cells: 3 (3 placeable)   Tenants: 9   Capacity: 18   Free slots: 9
+
+CELL    TYPE    STATUS  TENANTS  CAPACITY  UTILIZATION  URL
+...
+
+Warnings:
+  capacity_low: Every shared active cell is at or past the 75% target; ...
+```
+**Placeable cells** are shared and active, so they can take new tenants. The status shows two warnings:
+- `capacity_low`: every placeable cell is past the 75% target.
+- `no_capacity`: new tenants will be refused.
+
+Either one means it's time for `cells deploy` or `cells set-capacity`.
+
+### Errors and exit codes
 
 | Error | Meaning |
 |---|---|
-| `tenant_exists` | A tenant with that ID already exists. |
-| `no_capacity` | Every shared, active cell is full. Register a cell or raise a cell's capacity. |
-| `provisioning_failed` | The chosen cell couldn't set the tenant up (for example, it's down). Nothing is left behind; retry once the cell is healthy. |
-| `validation_error` | The tenant ID or tier isn't valid. |
+| `no_capacity` | No placeable cell has room. Deploy a cell or raise a cell's capacity. |
+| `tenant_exists` / `cell_exists` | That ID is already in use. |
+| `provisioning_failed` | The chosen cell couldn't set the tenant up (e.g. it's down). Nothing is left behind; retry once it's healthy. |
+| `capacity_below_tenants` | Capacity can't be set below the cell's current tenant count. |
+| `cell_not_empty` | A cell with tenants can't be decommissioned. |
+| `missing_cell_credential` | Registering without `--credential` for a cell whose credential isn't configured. |
+| `cell_unreachable` / `cell_id_mismatch` / `cell_credential_rejected` | The cell failed the checks done before it is registered. |
+| `validation_error` | An ID or option isn't valid. |
 
-### Cell commands
-
-Tenants are placed on cells, so these are often needed alongside the tenant commands.
-
-| Command | What it does |
-|---|---|
-| `cellctl cells list` | List cells with type, status, tenant count, capacity and utilization. |
-| `cellctl cells get <cell-id>` | Show one cell as JSON. |
-| `cellctl cells register <cell-id> <url> [--capacity N] [--type shared\|dedicated] [--size small\|medium\|large] [--wave N]` | Register a cell. Its credential must already be configured in the control plane (`CELL_CREDENTIALS`), otherwise this fails with `missing_cell_credential`. |
-| `cellctl cells set-status <cell-id> active\|draining\|disabled` | `draining` or `disabled` stops new tenants from being placed on the cell; existing tenants keep working. |
-
-```powershell
-cellctl cells list
-cellctl cells set-status cell-1 draining   # new tenants now go elsewhere
-cellctl cells set-status cell-1 active
-```
-
-#### `cells register` parameters
-
-| Parameter | Required | Meaning | Default |
-|---|---|---|---|
-| `cell-id` | Yes | Unique name, 2–63 lowercase letters, digits or hyphens (e.g. `cell-3`). Must match the cell's own `CELL_ID`. | — |
-| `url` | Yes | Address the **control plane and router** use to reach the cell, not your browser's. Locally that's the compose service name, e.g. `http://cell-3:8000`, not `localhost`. | — |
-| `--capacity` | No | Maximum tenants on the cell. Fill-first places tenants up to 75% of it, then uses the remaining room. | Control plane's `DEFAULT_CELL_CAPACITY` (4 locally, otherwise 100) |
-| `--type` | No | `shared` for many tenants; `dedicated` is reserved for one tenant and never used for pooled placement. | `shared` |
-| `--size` | No | `small`, `medium` or `large`. A label for now; maps to AWS instance sizes in stage 5. | `small` |
-| `--wave` | No | Release wave for cell-by-cell rollouts (stage 6); `0` is the canary. | `1` |
-
-**Before registering a cell:**
-1. **It must be running** and reachable at `url`. `register` doesn't check this; a tenant placed on an unreachable cell fails with `provisioning_failed`.
-2. **The control plane must hold its credential:** `CELL_CREDENTIALS` must include `<cell-id>=<token>`, with the same token the cell has as `CELL_INTERNAL_TOKEN`. Otherwise `register` fails with `missing_cell_credential`.
-
-#### Adding a cell to the local stack
-
-When both local cells are full (`no_capacity`), add a third with the ready-made override file [deploy/cell-3.override.yml](deploy/cell-3.override.yml). It starts `cell-3` and restarts the control plane with cell-3's credential. Existing tenants are kept.
-
-```powershell
-docker compose -f deploy/docker-compose.yml -f deploy/cell-3.override.yml up -d --wait
-cellctl cells register cell-3 http://cell-3:8000 --capacity 4
-cellctl tenants create acme5 --name "Acme5" --tier premium   # lands on cell-3
-cellctl cells list
-```
-
-Keep passing both `-f` files for later commands on this stack (`ps`, `logs`, `down -v`), or compose won't know about `cell-3`. To add a `cell-4`, copy the override, rename `cell-3` to `cell-4` throughout, and make its `CELL_CREDENTIALS` line list **all** cells (`cell-1` to `cell-4`): each override replaces the whole value.
-
-### Output and exit codes
-
-- **Output:** lists print as tables; single records print as JSON.
+- **Output:** lists print as tables; single records as JSON; progress messages go to stderr.
 - **Exit codes:**
   - `0` on success;
-  - `1` when the control plane returns an error or can't be reached (the message goes to stderr);
-  - `2` for usage errors, such as a missing token or an invalid option.
-
-Moving tenants between cells and seasonal schedules are added to `cellctl` in later stages (3 and 4).
+  - `1` when the control plane or Docker returns an error, or can't be reached;
+  - `2` for usage errors, such as a missing token, an invalid option or a missing compose file.
 
 ## Development
 
@@ -174,7 +224,7 @@ src/cellarch/
   control_plane/           registry, fill-first placement, onboarding, admin + routing APIs
   data_plane/router/       tenant routing, route cache with stale fallback, proxy
   data_plane/cell/         tenant-scoped store and API, /internal provisioning
-  cli/                     cellctl
+  cli/                     cellctl and its local Docker runner (cells deploy/decommission)
 tests/acceptance/          stage acceptance tests against the in-process platform
 tests/unit/                unit tests per component
 scripts/demo.py            end-to-end walkthrough (also the compose smoke test)

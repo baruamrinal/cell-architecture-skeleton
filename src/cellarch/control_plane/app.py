@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Annotated
 
 import httpx
-from fastapi import APIRouter, FastAPI, Path
+from fastapi import APIRouter, FastAPI, Path, Response
 from pydantic import BaseModel, Field
 
 from cellarch.common.config import ConfigError, parse_pairs, require_env
@@ -33,7 +33,8 @@ from cellarch.common.contracts import (
 from cellarch.common.errors import ApiError, install_error_handlers
 from cellarch.common.logging import configure_logging
 from cellarch.common.security import TokenAuth
-from cellarch.control_plane.cell_client import CellClient
+from cellarch.control_plane.cell_client import CellClient, CellVerificationError
+from cellarch.control_plane.credentials import LocalCredentialStore
 from cellarch.control_plane.placement import (
     CellCandidate,
     FillFirstPlacement,
@@ -84,6 +85,9 @@ class CellRegistration(BaseModel):
     size: CellSize = "small"
     capacity: int | None = Field(default=None, ge=1)
     wave: int = Field(default=1, ge=0)
+    # Write-only: stored for calling the cell, never returned. Optional when the
+    # credential is configured (CELL_CREDENTIALS).
+    credential: str | None = Field(default=None, min_length=16, max_length=512, repr=False)
 
 
 class CellUpdate(BaseModel):
@@ -122,6 +126,26 @@ class Tenant(BaseModel):
     updated_at: str
 
 
+class StatusWarning(BaseModel):
+    code: str
+    message: str
+
+
+class StatusTotals(BaseModel):
+    cells: int
+    placeable_cells: int  # shared and active: where new tenants can go
+    tenants: int
+    capacity: int  # across placeable cells
+    free_slots: int  # across placeable cells
+
+
+class PlatformStatus(BaseModel):
+    target_utilization: float
+    totals: StatusTotals
+    cells: list[Cell]
+    warnings: list[StatusWarning]
+
+
 TenantId = Annotated[str, Path(pattern=TENANT_ID_PATTERN)]
 
 
@@ -144,7 +168,8 @@ def create_app(
         store.seed_cell(cell_id, url, settings.default_cell_capacity)
 
     http = http_client or httpx.AsyncClient(timeout=10.0)
-    cells = CellClient(http, settings.cell_credentials)
+    credentials = LocalCredentialStore(settings.db_path, settings.cell_credentials)
+    cells = CellClient(http, credentials)
     strategy = placement or FillFirstPlacement(settings.target_utilization)
     auth = TokenAuth({ADMIN_ROLE: settings.admin_token, ROUTER_ROLE: settings.router_token})
 
@@ -173,13 +198,23 @@ def create_app(
         return cell
 
     @admin.post("/cells", status_code=201)
-    def register_cell(body: CellRegistration) -> Cell:
-        if not cells.has_credential(body.cell_id):
+    async def register_cell(body: CellRegistration) -> Cell:
+        if store.get_cell(body.cell_id) is not None:
+            raise ApiError(409, "cell_exists", f"cell {body.cell_id} already exists")
+        credential = body.credential or credentials.get(body.cell_id)
+        if not credential:
             raise ApiError(
                 422,
                 "missing_cell_credential",
-                f"no credential is configured for {body.cell_id}; add it before registering",
+                f"no credential for {body.cell_id}: pass one, or configure CELL_CREDENTIALS",
             )
+        try:
+            await cells.verify(body.cell_id, body.url, credential)
+        except CellVerificationError as exc:
+            raise ApiError(422, exc.code, exc.message) from exc
+
+        if body.credential:
+            credentials.put(body.cell_id, body.credential)
         try:
             row = store.add_cell(
                 cell_id=body.cell_id,
@@ -190,8 +225,9 @@ def create_app(
                 capacity=body.capacity or settings.default_cell_capacity,
                 wave=body.wave,
             )
-        except DuplicateError as exc:
+        except DuplicateError as exc:  # pragma: no cover - concurrent register of the same id
             raise ApiError(409, "cell_exists", f"cell {body.cell_id} already exists") from exc
+        log.info("cell %s registered at %s", body.cell_id, body.url)
         return _cell(row)
 
     @admin.get("/cells")
@@ -204,9 +240,83 @@ def create_app(
 
     @admin.patch("/cells/{cell_id}")
     def update_cell(cell_id: str, body: CellUpdate) -> Cell:
-        require_cell(cell_id)
+        cell = require_cell(cell_id)
+        tenants = int(str(cell["tenant_count"]))
+        if body.capacity is not None and body.capacity < tenants:
+            raise ApiError(
+                409,
+                "capacity_below_tenants",
+                f"{cell_id} hosts {tenants} tenants; capacity can't be lower than that",
+            )
         row = store.update_cell(cell_id, status=body.status, capacity=body.capacity)
         return _cell(row or require_cell(cell_id))
+
+    @admin.delete("/cells/{cell_id}", status_code=204)
+    def decommission_cell(cell_id: str) -> Response:
+        cell = require_cell(cell_id)
+        tenants = int(str(cell["tenant_count"]))
+        if tenants:
+            raise ApiError(
+                409,
+                "cell_not_empty",
+                f"{cell_id} still hosts {tenants} tenants; move them off first",
+            )
+        store.delete_cell(cell_id)
+        credentials.delete(cell_id)
+        log.info("cell %s decommissioned", cell_id)
+        return Response(status_code=204)
+
+    def candidates() -> list[CellCandidate]:
+        return [
+            CellCandidate(
+                cell_id=str(c["cell_id"]),
+                type=str(c["type"]),
+                status=str(c["status"]),
+                capacity=int(c["capacity"]),
+                tenant_count=int(c["tenant_count"]),
+            )
+            for c in store.list_cells()
+        ]
+
+    @admin.get("/status")
+    def platform_status() -> PlatformStatus:
+        rows = store.list_cells()
+        placeable = [c for c in rows if c["type"] == "shared" and c["status"] == "active"]
+        warnings: list[StatusWarning] = []
+        try:
+            decision = strategy.choose(candidates())
+        except NoCapacityError:
+            warnings.append(
+                StatusWarning(
+                    code="no_capacity",
+                    message="No shared active cell has room: new tenants will be refused. "
+                    "Deploy a cell or raise a cell's capacity.",
+                )
+            )
+        else:
+            if decision.over_target:
+                warnings.append(
+                    StatusWarning(
+                        code="capacity_low",
+                        message=f"Every shared active cell is at or past the "
+                        f"{settings.target_utilization:.0%} target; new tenants use the "
+                        "remaining room. Deploy another cell soon.",
+                    )
+                )
+        return PlatformStatus(
+            target_utilization=settings.target_utilization,
+            totals=StatusTotals(
+                cells=len(rows),
+                placeable_cells=len(placeable),
+                tenants=sum(int(c["tenant_count"]) for c in rows),
+                capacity=sum(int(c["capacity"]) for c in placeable),
+                free_slots=sum(
+                    max(0, int(c["capacity"]) - int(c["tenant_count"])) for c in placeable
+                ),
+            ),
+            cells=[_cell(row) for row in rows],
+            warnings=warnings,
+        )
 
     # --- admin API: tenants --------------------------------------------------------------
 
@@ -222,18 +332,8 @@ def create_app(
         if store.get_tenant(tenant_id) is not None:
             raise ApiError(409, "tenant_exists", f"tenant {tenant_id} already exists")
 
-        candidates = [
-            CellCandidate(
-                cell_id=str(c["cell_id"]),
-                type=str(c["type"]),
-                status=str(c["status"]),
-                capacity=int(c["capacity"]),
-                tenant_count=int(c["tenant_count"]),
-            )
-            for c in store.list_cells()
-        ]
         try:
-            decision = strategy.choose(candidates)
+            decision = strategy.choose(candidates())
         except NoCapacityError as exc:
             log.error("no capacity for tenant %s", tenant_id)
             raise ApiError(503, "no_capacity", "no cell has room for a new tenant") from exc
