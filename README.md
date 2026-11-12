@@ -75,16 +75,22 @@ Stop everything with `.\make down`. To also delete all data, run `docker compose
 ### Setup
 
 ```powershell
-.venv\Scripts\Activate.ps1                     # or call it by path: .venv\Scripts\cellctl
-$env:CELLCTL_TOKEN = "dev-admin-token"         # admin credential (local development default)
+. .\make up          # activates .venv and sets CELLCTL_TOKEN in this terminal
+cellctl status
 ```
 
-Run `cellctl` from the repo root. Optional settings (each also has a command-line flag):
+Run `cellctl` from the project folder. It **reads `.env` there**, so it works in any terminal with the virtual environment active, without setting a token by hand. Settings are taken in this order, first match wins:
+1. a command-line flag (`--token`, …);
+2. an environment variable (`CELLCTL_TOKEN`, …);
+3. the same `CELLCTL_*` setting in `.env`;
+4. for the token only, `ADMIN_TOKEN` in `.env`.
+
+Without a `.env` file and with no token set, `cellctl` asks for one rather than assuming a development default.
 
 | Setting | Flag | Default |
 |---|---|---|
 | `CELLCTL_URL` | `--url` | `http://localhost:8000` (control plane admin API) |
-| `CELLCTL_TOKEN` | `--token` | none; required |
+| `CELLCTL_TOKEN` | `--token` | `ADMIN_TOKEN` from `.env`; otherwise required |
 | `CELLCTL_COMPOSE_FILE` | `--compose-file` | `deploy/docker-compose.yml` (used by `cells deploy` / `decommission`) |
 | `CELLCTL_ACTOR` | `--actor` | your OS user name; recorded as who created or changed cells and tenants |
 

@@ -40,7 +40,10 @@ try {
 if ($code -eq 0 -and $Target -in @("up", "setup", "test", "status") -and (Test-Path $activate)) {
     if ($dotSourced) {
         . $activate
-        Write-Host "Virtual environment activated: cellctl is ready in this terminal."
+        # Same admin token the stack was started with (.env, or the development default).
+        $token = & $venvPython (Join-Path $root "scripts\dev.py") token
+        if ($LASTEXITCODE -eq 0 -and $token) { $env:CELLCTL_TOKEN = "$token".Trim() }
+        Write-Host "Virtual environment activated and CELLCTL_TOKEN set: cellctl is ready in this terminal."
     } elseif (-not $env:VIRTUAL_ENV) {
         Write-Host "Tip: run '. .\make up' (with the leading dot) or '.venv\Scripts\Activate.ps1' to use cellctl in this terminal."
     }

@@ -28,7 +28,7 @@ import os
 import re
 import secrets
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +45,7 @@ from cellarch.cli.docker import (
     volume_name,
 )
 from cellarch.common.contracts import is_valid_tenant_id
+from cellarch.common.dotenv import load_env_file
 from cellarch.common.headers import ACTOR_HEADER, INTERNAL_TOKEN_HEADER
 
 DEFAULT_URL = "http://localhost:8000"
@@ -110,18 +111,35 @@ def _positive_int(value: str) -> int:
     return number
 
 
-def _parser() -> argparse.ArgumentParser:
+ENV_FILE = Path(".env")
+
+
+def _settings() -> dict[str, str]:
+    """CELLCTL_* settings: environment variables win over .env in the current folder.
+
+    When no CELLCTL_TOKEN is set anywhere, ADMIN_TOKEN from .env is used, so a
+    project folder set up with `make up` needs no extra configuration.
+    """
+    file_values = load_env_file(ENV_FILE) or {}
+    settings = {k: v for k, v in file_values.items() if k.startswith("CELLCTL_")}
+    settings.update({k: v for k, v in os.environ.items() if k.startswith("CELLCTL_")})
+    if not settings.get("CELLCTL_TOKEN") and file_values.get("ADMIN_TOKEN"):
+        settings["CELLCTL_TOKEN"] = file_values["ADMIN_TOKEN"]
+    return settings
+
+
+def _parser(settings: Mapping[str, str]) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cellctl", description="Control plane admin CLI")
-    parser.add_argument("--url", default=os.environ.get("CELLCTL_URL", DEFAULT_URL))
-    parser.add_argument("--token", default=os.environ.get("CELLCTL_TOKEN"))
+    parser.add_argument("--url", default=settings.get("CELLCTL_URL", DEFAULT_URL))
+    parser.add_argument("--token", default=settings.get("CELLCTL_TOKEN"))
     parser.add_argument(
         "--actor",
-        default=os.environ.get("CELLCTL_ACTOR"),
+        default=settings.get("CELLCTL_ACTOR"),
         help="your name, recorded as created_by/updated_by (default: your OS user name)",
     )
     parser.add_argument(
         "--compose-file",
-        default=os.environ.get("CELLCTL_COMPOSE_FILE", DEFAULT_COMPOSE_FILE),
+        default=settings.get("CELLCTL_COMPOSE_FILE", DEFAULT_COMPOSE_FILE),
         help="local compose stack used by `cells deploy` and `cells decommission`",
     )
     resources = parser.add_subparsers(dest="resource", required=True)
@@ -378,11 +396,16 @@ def main(
     token: str | None = None,
     docker: DockerRunner | None = None,
 ) -> int:
-    args = _parser().parse_args(argv)
+    try:
+        settings = _settings()
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    args = _parser(settings).parse_args(argv)
 
     token = token or args.token
     if not token:
-        print("error: set CELLCTL_TOKEN or pass --token", file=sys.stderr)
+        print("error: set CELLCTL_TOKEN, pass --token, or add ADMIN_TOKEN to .env", file=sys.stderr)
         return EXIT_USAGE
 
     api = Api(client or make_client(args.url), token, args.actor or default_actor())

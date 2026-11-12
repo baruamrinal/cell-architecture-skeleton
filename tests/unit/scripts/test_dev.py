@@ -235,6 +235,36 @@ class TestTargets:
         assert dev.main(["down"], root=root, run=FakeRunner()) == 2
         assert ".env line 1" in capsys.readouterr().err
 
+    @pytest.mark.parametrize(
+        ("env_file", "token"),
+        [
+            (None, "dev-admin-token"),
+            ("ADMIN_TOKEN=from-admin\n", "from-admin"),
+            ("ADMIN_TOKEN=a\nCELLCTL_TOKEN=from-cellctl\n", "from-cellctl"),
+        ],
+    )
+    def test_token_target_prints_only_the_token(
+        self,
+        root: Path,
+        capsys: pytest.CaptureFixture[str],
+        env_file: str | None,
+        token: str,
+    ) -> None:
+        # Used by make.ps1 to set CELLCTL_TOKEN in the caller's terminal.
+        if env_file:
+            (root / ".env").write_text(env_file)
+        run = FakeRunner()
+        assert dev.main(["token"], root=root, run=run) == 0
+        assert capsys.readouterr().out == f"{token}\n"
+        assert run.calls == []
+
+    def test_token_target_reports_a_bad_env_file(
+        self, root: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        (root / ".env").write_text("broken\n")
+        assert dev.main(["token"], root=root, run=FakeRunner()) == 2
+        assert capsys.readouterr().out == ""
+
     def test_help_and_unknown_targets(self, root: Path, capsys: pytest.CaptureFixture[str]) -> None:
         assert dev.main(["help"], root=root, run=FakeRunner()) == 0
         assert "make up" in capsys.readouterr().out

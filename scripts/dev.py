@@ -14,13 +14,19 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# The .env reader is shared with cellctl. It's standard library only, so it can be
+# imported from the source tree before the virtual environment exists.
+sys.path.insert(0, str(ROOT / "src"))
+from cellarch.common.dotenv import load_env_file, parse_env  # noqa: E402
+
+__all__ = ["parse_env"]  # re-exported for callers of this module
+
 BASE_COMPOSE = Path("deploy") / "docker-compose.yml"
 CELLS_DIR = Path("deploy") / "cells"  # compose files written by `cellctl cells deploy`
 ENV_FILE = ".env"
@@ -28,8 +34,6 @@ DEFAULT_ADMIN_TOKEN = "dev-admin-token"  # noqa: S105 - local development defaul
 INSTALL_MARKER = ".cellarch-installed"
 
 Runner = Callable[[Sequence[str], Mapping[str, str]], int]
-
-_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 HELP = """\
 Usage: .\\make <target>   (macOS/Linux: make <target>)
@@ -49,30 +53,8 @@ class DevError(Exception):
     """A problem with the local setup, reported without a traceback."""
 
 
-def parse_env(text: str) -> dict[str, str]:
-    """Parse a .env file: KEY=VALUE lines, # comments, optional `export` and quotes."""
-    values: dict[str, str] = {}
-    for number, raw in enumerate(text.splitlines(), start=1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        line = line.removeprefix("export ").strip()
-        key, separator, value = line.partition("=")
-        key = key.strip()
-        if not separator or not _KEY.fullmatch(key):
-            raise ValueError(f".env line {number}: expected KEY=VALUE")
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        values[key] = value
-    return values
-
-
 def load_env(root: Path) -> dict[str, str] | None:
-    path = root / ENV_FILE
-    if not path.is_file():
-        return None
-    return parse_env(path.read_text(encoding="utf-8"))
+    return load_env_file(root / ENV_FILE)
 
 
 def compose_files(root: Path, env: Mapping[str, str]) -> list[Path]:
@@ -128,12 +110,13 @@ def ensure_venv(
     return code
 
 
-def _settings(root: Path) -> dict[str, str]:
+def _settings(root: Path, *, quiet: bool = False) -> dict[str, str]:
     env = load_env(root)
     if env is None:
-        print("No .env file; using development defaults (copy .env.example to .env to change).")
+        if not quiet:
+            print("No .env file; using development defaults (copy .env.example to .env).")
         env = {}
-    else:
+    elif not quiet:
         print("Using settings from .env.")
     env.setdefault("CELLCTL_TOKEN", env.get("ADMIN_TOKEN", DEFAULT_ADMIN_TOKEN))
     return env
@@ -150,6 +133,15 @@ def main(argv: Sequence[str] | None = None, *, root: Path = ROOT, run: Runner | 
 
     if target == "help":
         print(HELP)
+        return 0
+    if target == "token":
+        # Internal: prints the admin token `make up` uses, so make.ps1 can set
+        # CELLCTL_TOKEN in the caller's terminal. Not listed in the help.
+        try:
+            print(_settings(root, quiet=True)["CELLCTL_TOKEN"])
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         return 0
     if target not in ("up", "down", "status", "build", "test", "setup"):
         print(f"error: unknown target {target!r}\n\n{HELP}", file=sys.stderr)
