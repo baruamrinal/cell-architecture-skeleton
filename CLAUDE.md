@@ -21,6 +21,19 @@ Stage 1 (core platform) implemented: cell, control plane, router, `cellctl`, Doc
 - **Git:** never commit directly to `main`. Use a branch per change (`feat/…`, `fix/…`, `docs/…`, `infra/…`, `ci/…`) and open a PR. Commit or push only when asked.
 - **PRs:** titles follow conventional commits (`feat: …`, `fix(router): …`), because squash merge makes the title the commit message. `github-actions[bot]` approves via the policy gate (docs/plan.md §9.1) when CI is green, `src/` changes include `tests/` changes, and no protected paths (`.github/**`, `scripts/ci/**`) are touched.
 
+## Enterprise design principles (docs/plan.md §1.1)
+
+This is a skeleton, but it must meet an **enterprise design**. It may implement less than production, never structure things differently. For every change, check:
+
+1. **Production equivalent:** is it documented in `docs/production-architecture.md`? Local stand-ins (SQLite, Docker, `.env` tokens) must sit behind the same interface as the production service (Aurora, ECS, Secrets Manager).
+2. **Boundaries:** no shortcuts across control/data plane, cells or tenants; internal APIs stay internal; one credential per role.
+3. **Secure by default:** no secrets in git or logs, hardened containers, pinned images, validated input.
+4. **Operable:** structured logs with `request_id` / `tenant_id` / `cell_id`, `/healthz` (alive) vs `/readyz` (dependencies OK), graceful shutdown, versioned migrations, validated and documented configuration.
+5. **Stable APIs:** `/v1` paths, one error shape, cursor pagination, idempotency keys on creates.
+6. **Tested like production:** acceptance criteria first, adapter tests against real Postgres/Redis/Docker.
+
+If a change can't meet one of these, say so in the PR and record it in the decisions log.
+
 ## Architecture invariants (do not break)
 
 1. **Control plane vs data plane.** The control plane (`src/cellarch/control_plane/`) is never on the request path. The data plane (`src/cellarch/data_plane/router/`, `src/cellarch/data_plane/cell/`) must keep serving when the control plane is down (cached routes, cells know their own tenants).
