@@ -85,4 +85,18 @@ What each delivery stage must do, in plain language. The precise, executable ver
 | A40 | a router with the Redis limiter switched on, but Redis down | a tenant sends requests | requests are still limited by the router's own in-memory limiter (fail-open: traffic never stops because Redis is down) |
 | A41 | two routers sharing one Redis | a tenant with a burst of 4 sends requests through both | the routers share one bucket: 4 requests in total succeed, the next is throttled (runs when `REDIS_URL` points at a Redis; skipped otherwise) |
 
+## Stage 2.5: tenant services
+
+### A tenant's service stack (user-account + order-processing)
+
+| ID | Given | When | Then |
+|---|---|---|---|
+| A42 | a tenant's user-account and order-processing services | a user is created, then an order for that user | the order is `placed` with the computed total, can be read back, and cancelled once (`cancelled`; cancelling again is `409`) |
+| A43 | the same stack | an order is placed for a user that doesn't exist | it is rejected with `422 unknown_user` and nothing is stored |
+| A44 | the tenant's user-account is down | an order is placed | order-processing answers `503 dependency_unavailable` with `Retry-After`, and stays ready for reads |
+| A45 | a create request sent with an `Idempotency-Key` | it is retried with the same key and body, or with the same key and a different body | the retry returns the original response without creating a duplicate (`Idempotent-Replay: true`); a different body is rejected with `422 idempotency_key_reused` |
+| A46 | more users or orders than one page | they are listed with a `limit` | results come in creation order with a `next_cursor`, and following the cursors returns every record exactly once |
+| A47 | a service of one tenant | it is called without the stack's credential, or for another tenant | it is rejected (`401`, or `421 tenant_mismatch`) |
+| A48 | a service's database | the service starts, or `/healthz` and `/readyz` are called | versioned migrations are applied once and recorded; `/healthz` answers while the process is alive, `/readyz` only while its database works |
+
 Stage 1 also has a demo acceptance check: `scripts/demo.py` runs end-to-end against the in-process platform (`tests/acceptance/test_demo.py`) and against the real compose stack in CI (`compose-smoke`).
