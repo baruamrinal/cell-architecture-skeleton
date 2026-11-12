@@ -70,7 +70,9 @@ class CellStore:
 
     def delete_tenant(self, tenant_id: str) -> bool:
         with connect(self._db_path) as conn:
-            return conn.execute("DELETE FROM tenants WHERE tenant_id = ?", (tenant_id,)).rowcount > 0
+            return (
+                conn.execute("DELETE FROM tenants WHERE tenant_id = ?", (tenant_id,)).rowcount > 0
+            )
 
     # --- items (tenant data; every query is scoped by tenant_id) ------------------------
 

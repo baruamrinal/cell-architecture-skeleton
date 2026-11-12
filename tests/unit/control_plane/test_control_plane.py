@@ -9,7 +9,29 @@ from fastapi.testclient import TestClient
 from cellarch.common.config import ConfigError
 from cellarch.common.headers import INTERNAL_TOKEN_HEADER
 from cellarch.control_plane.app import ControlPlaneSettings, create_app
+from cellarch.control_plane.cell_client import CellClient, MissingCellCredentialError
 from cellarch.control_plane.store import ControlPlaneStore, DuplicateError
+
+
+def test_cell_client_refuses_cells_without_credentials() -> None:
+    import asyncio
+
+    client = CellClient(httpx.AsyncClient(), {"cell-1": "t"})
+    assert client.has_credential("cell-1")
+    assert not client.has_credential("cell-2")
+    with pytest.raises(MissingCellCredentialError):
+        asyncio.run(client.provision_tenant("cell-2", "http://cell-2", "acme"))
+
+
+def test_owned_http_client_is_closed_on_shutdown(tmp_path: Path) -> None:
+    app = create_app(
+        ControlPlaneSettings(
+            db_path=str(tmp_path / "cp.db"), admin_token="a", router_token="r", cell_credentials={}
+        )
+    )
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+
 
 ADMIN = "admin-t"
 ROUTER = "router-t"
@@ -123,9 +145,9 @@ class TestApp:
         created = client.post("/v1/cells", json={"cell_id": "cell-1", "url": "http://cell-1"})
         assert created.status_code == 201
         assert created.json()["capacity"] == 7
-        assert client.post(
-            "/v1/cells", json={"cell_id": "cell-1", "url": "http://cell-1"}
-        ).json()["error"] == ("cell_exists")
+        assert client.post("/v1/cells", json={"cell_id": "cell-1", "url": "http://cell-1"}).json()[
+            "error"
+        ] == ("cell_exists")
         assert client.get("/v1/cells/cell-1").json()["type"] == "shared"
         patched = client.patch("/v1/cells/cell-1", json={"status": "draining"})
         assert patched.json()["status"] == "draining"

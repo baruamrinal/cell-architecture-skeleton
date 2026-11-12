@@ -8,6 +8,6 @@ CELL_HEADER = "X-Cell-ID"
 
 # Service credential for control-plane APIs and cell /internal endpoints.
 # Never accepted from clients: the router strips it.
-INTERNAL_TOKEN_HEADER = "X-Internal-Token"
+INTERNAL_TOKEN_HEADER = "X-Internal-Token"  # noqa: S105 - a header name, not a secret
 
 REQUEST_ID_HEADER = "X-Request-ID"

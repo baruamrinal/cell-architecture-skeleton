@@ -88,6 +88,10 @@ class TestCellApp:
         response = client.get("/v1/items")
         assert (response.status_code, response.json()["error"]) == (400, "missing_tenant")
 
+    def test_malformed_tenant_header(self, client: TestClient) -> None:
+        response = client.get("/v1/items", headers={TENANT_HEADER: "Not Valid"})
+        assert (response.status_code, response.json()["error"]) == (400, "invalid_tenant")
+
     def test_item_lifecycle(self, client: TestClient) -> None:
         provision(client)
         headers = {TENANT_HEADER: "acme"}
@@ -113,9 +117,9 @@ class TestCellApp:
     def test_internal_list_and_idempotent_delete(self, client: TestClient) -> None:
         provision(client)
         headers = {INTERNAL_TOKEN_HEADER: TOKEN}
-        assert [t["tenant_id"] for t in client.get("/internal/tenants", headers=headers).json()] == [
-            "acme"
-        ]
+        assert [
+            t["tenant_id"] for t in client.get("/internal/tenants", headers=headers).json()
+        ] == ["acme"]
         assert client.delete("/internal/tenants/acme", headers=headers).status_code == 204
         assert client.delete("/internal/tenants/acme", headers=headers).status_code == 204
         assert client.get("/internal/tenants", headers=headers).json() == []

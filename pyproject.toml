@@ -59,7 +59,7 @@ select = ["E", "F", "W", "I", "B", "UP", "S", "SIM"]
 known-first-party = ["cellarch", "pr_gate"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+"tests/**" = ["S101", "S105", "S106"]  # asserts and fake test credentials
 
 [tool.mypy]
 python_version = "3.12"

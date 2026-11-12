@@ -59,8 +59,9 @@ def test_past_target_falls_back_to_emptiest_cell_with_room() -> None:
         {"type": "dedicated"},
     ],
 )
-def test_ineligible_cells_are_never_chosen(excluded: dict[str, str]) -> None:
-    decision = placement.choose([cell("cell-1", 0, **excluded), cell("cell-2", 3)])
+def test_ineligible_cells_are_never_chosen(excluded: dict[str, object]) -> None:
+    ineligible = replace(cell("cell-1", 0), **excluded)  # type: ignore[arg-type]
+    decision = placement.choose([ineligible, cell("cell-2", 3)])
     assert decision.cell_id == "cell-2"
 
 

@@ -94,7 +94,8 @@ class Platform:
 
     def create_tenant(self, tenant_id: str, **fields: Any) -> httpx.Response:
         body = {"tenant_id": tenant_id, "name": tenant_id.title(), **fields}
-        return self.admin.post("/v1/tenants", json=body)
+        response: httpx.Response = self.admin.post("/v1/tenants", json=body)
+        return response
 
     def onboard(self, tenant_id: str) -> str:
         """Create a tenant and return the cell it was placed on."""
@@ -103,11 +104,10 @@ class Platform:
         cell_id: str = response.json()["cell_id"]
         return cell_id
 
-    def as_tenant(
-        self, tenant_id: str, method: str, path: str, **kwargs: Any
-    ) -> httpx.Response:
+    def as_tenant(self, tenant_id: str, method: str, path: str, **kwargs: Any) -> httpx.Response:
         headers = {TENANT_HEADER: tenant_id, **kwargs.pop("headers", {})}
-        return self.router.request(method, path, headers=headers, **kwargs)
+        response: httpx.Response = self.router.request(method, path, headers=headers, **kwargs)
+        return response
 
 
 @pytest.fixture

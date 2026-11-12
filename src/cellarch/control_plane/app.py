@@ -249,7 +249,7 @@ def create_app(
         # instance (plan §2.1). A shared database needs a transactional reservation.
         try:
             store.add_tenant(tenant_id, body.name, body.tier, decision.cell_id)
-        except DuplicateError as exc:
+        except DuplicateError as exc:  # pragma: no cover - concurrent create of the same id
             raise ApiError(409, "tenant_exists", f"tenant {tenant_id} already exists") from exc
 
         cell = require_cell(decision.cell_id)
