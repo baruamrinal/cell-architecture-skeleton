@@ -22,8 +22,10 @@ deploy trigger the cell-lifecycle workflow.
 """
 
 import argparse
+import getpass
 import json
 import os
+import re
 import secrets
 import sys
 from collections.abc import Sequence
@@ -43,9 +45,10 @@ from cellarch.cli.docker import (
     volume_name,
 )
 from cellarch.common.contracts import is_valid_tenant_id
-from cellarch.common.headers import INTERNAL_TOKEN_HEADER
+from cellarch.common.headers import ACTOR_HEADER, INTERNAL_TOKEN_HEADER
 
 DEFAULT_URL = "http://localhost:8000"
+_UNSAFE_ACTOR_CHARS = re.compile(r"[^A-Za-z0-9._@-]+")
 DEFAULT_COMPOSE_FILE = "deploy/docker-compose.yml"
 EXIT_OK, EXIT_ERROR, EXIT_USAGE = 0, 1, 2
 
@@ -68,16 +71,25 @@ def make_client(url: str) -> httpx.Client:
     return httpx.Client(base_url=url, timeout=30.0)
 
 
+def default_actor() -> str | None:
+    """The OS user name, made safe for the X-Actor header (recorded as created_by)."""
+    try:
+        user = getpass.getuser()
+    except Exception:  # getpass raises OSError/KeyError when no user name is available
+        return None
+    return _UNSAFE_ACTOR_CHARS.sub("-", user).strip("-")[:64] or None
+
+
 class Api:
-    def __init__(self, http: httpx.Client, token: str) -> None:
+    def __init__(self, http: httpx.Client, token: str, actor: str | None = None) -> None:
         self._http = http
-        self._token = token
+        self._headers = {INTERNAL_TOKEN_HEADER: token}
+        if actor:
+            self._headers[ACTOR_HEADER] = actor
 
     def call(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
         try:
-            response = self._http.request(
-                method, path, json=body, headers={INTERNAL_TOKEN_HEADER: self._token}
-            )
+            response = self._http.request(method, path, json=body, headers=self._headers)
         except httpx.HTTPError as exc:
             raise CommandError("unreachable", f"cannot reach control plane: {exc}") from exc
         data = response.json() if response.content else None
@@ -102,6 +114,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cellctl", description="Control plane admin CLI")
     parser.add_argument("--url", default=os.environ.get("CELLCTL_URL", DEFAULT_URL))
     parser.add_argument("--token", default=os.environ.get("CELLCTL_TOKEN"))
+    parser.add_argument(
+        "--actor",
+        default=os.environ.get("CELLCTL_ACTOR"),
+        help="your name, recorded as created_by/updated_by (default: your OS user name)",
+    )
     parser.add_argument(
         "--compose-file",
         default=os.environ.get("CELLCTL_COMPOSE_FILE", DEFAULT_COMPOSE_FILE),
@@ -303,7 +320,7 @@ def _table(rows: list[list[str]]) -> str:
 
 
 def _cells_table(cells: list[dict[str, Any]]) -> str:
-    header = ["CELL", "TYPE", "STATUS", "TENANTS", "CAPACITY", "UTILIZATION", "URL"]
+    header = ["CELL", "TYPE", "STATUS", "TENANTS", "CAPACITY", "UTILIZATION", "CREATED BY", "URL"]
     rows = [
         [
             c["cell_id"],
@@ -312,6 +329,7 @@ def _cells_table(cells: list[dict[str, Any]]) -> str:
             str(c["tenant_count"]),
             str(c["capacity"]),
             f"{c['utilization'] * 100:.0f}%",
+            c["created_by"],
             c["url"],
         ]
         for c in cells
@@ -345,8 +363,11 @@ def _render(args: argparse.Namespace, data: Any) -> str:
         return json.dumps(data, indent=2)
     if args.resource == "cells":
         return _cells_table(data)
-    header = ["TENANT", "NAME", "TIER", "CELL", "STATUS"]
-    rows = [[t["tenant_id"], t["name"], t["tier"], t["cell_id"], t["status"]] for t in data]
+    header = ["TENANT", "NAME", "TIER", "CELL", "STATUS", "CREATED BY"]
+    rows = [
+        [t["tenant_id"], t["name"], t["tier"], t["cell_id"], t["status"], t["created_by"]]
+        for t in data
+    ]
     return _table([header, *rows])
 
 
@@ -364,7 +385,7 @@ def main(
         print("error: set CELLCTL_TOKEN or pass --token", file=sys.stderr)
         return EXIT_USAGE
 
-    api = Api(client or make_client(args.url), token)
+    api = Api(client or make_client(args.url), token, args.actor or default_actor())
     action = (args.resource, getattr(args, "action", None))
     try:
         if action == ("cells", "deploy"):

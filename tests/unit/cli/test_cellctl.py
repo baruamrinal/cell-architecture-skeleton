@@ -58,8 +58,11 @@ def test_register_and_list_cells(
         "TENANTS",
         "CAPACITY",
         "UTILIZATION",
+        "CREATED",
+        "BY",
         "URL",
     ]
+    assert "admin:tester" in out
     assert "cell-1" in out and "0%" in out
 
 
@@ -90,8 +93,8 @@ def test_create_get_and_list_tenants(
 
     assert run(control_plane, "tenants", "list") == 0
     lines = capsys.readouterr().out.splitlines()
-    assert lines[0].split() == ["TENANT", "NAME", "TIER", "CELL", "STATUS"]
-    assert lines[1].split() == ["acme", "Acme", "premium", "cell-1", "active"]
+    assert lines[0].split() == ["TENANT", "NAME", "TIER", "CELL", "STATUS", "CREATED", "BY"]
+    assert lines[1].split() == ["acme", "Acme", "premium", "cell-1", "active", "admin:tester"]
 
 
 def test_tenant_name_defaults_to_id(

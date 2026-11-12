@@ -7,6 +7,7 @@ Two APIs with separate credentials (docs/plan.md §2.3):
 
 import logging
 import os
+import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -14,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Annotated
 
 import httpx
-from fastapi import APIRouter, FastAPI, Path, Response
+from fastapi import APIRouter, Depends, FastAPI, Header, Path, Response
 from pydantic import BaseModel, Field
 
 from cellarch.common.config import ConfigError, parse_pairs, require_env
@@ -31,6 +32,7 @@ from cellarch.common.contracts import (
     Tier,
 )
 from cellarch.common.errors import ApiError, install_error_handlers
+from cellarch.common.headers import ACTOR_HEADER
 from cellarch.common.logging import configure_logging
 from cellarch.common.security import TokenAuth
 from cellarch.control_plane.cell_client import CellClient, CellVerificationError
@@ -46,6 +48,23 @@ from cellarch.control_plane.store import ControlPlaneStore, DuplicateError
 log = logging.getLogger("cellarch.control_plane")
 
 ADMIN_ROLE = "admin"
+
+_ACTOR_NAME = re.compile(r"[A-Za-z0-9._@-]{1,64}")
+
+
+def actor_label(role: str, actor: str | None) -> str:
+    """``role:name`` for created_by / updated_by, or just ``role`` without a name.
+
+    The role comes from the verified credential; the name is self-reported locally
+    (X-Actor) and becomes the verified IAM identity on AWS (stage 5).
+    """
+    if not actor:
+        return role
+    if not _ACTOR_NAME.fullmatch(actor):
+        raise ValueError("invalid caller name")
+    return f"{role}:{actor}"
+
+
 ROUTER_ROLE = "router"
 
 
@@ -107,6 +126,9 @@ class Cell(BaseModel):
     tenant_count: int
     utilization: float
     created_at: str
+    created_by: str
+    updated_at: str
+    updated_by: str
 
 
 class TenantCreate(BaseModel):
@@ -123,7 +145,9 @@ class Tenant(BaseModel):
     cell_id: str
     status: TenantStatus
     created_at: str
+    created_by: str
     updated_at: str
+    updated_by: str
 
 
 class StatusWarning(BaseModel):
@@ -189,7 +213,21 @@ def create_app(
 
     # --- admin API: cells ----------------------------------------------------------------
 
-    admin = APIRouter(prefix="/v1", dependencies=[auth.require(ADMIN_ROLE)])
+    async def current_actor(
+        role: str = auth.require(ADMIN_ROLE),
+        actor: Annotated[str | None, Header(alias=ACTOR_HEADER)] = None,
+    ) -> str:
+        try:
+            return actor_label(role, actor)
+        except ValueError as exc:
+            raise ApiError(
+                400,
+                "invalid_actor",
+                f"{ACTOR_HEADER} must be 1-64 characters: letters, digits, '.', '_', '@', '-'",
+            ) from exc
+
+    # Every admin call is authenticated and has its caller name checked.
+    admin = APIRouter(prefix="/v1", dependencies=[Depends(current_actor)])
 
     def require_cell(cell_id: str) -> dict[str, object]:
         cell = store.get_cell(cell_id)
@@ -198,7 +236,9 @@ def create_app(
         return cell
 
     @admin.post("/cells", status_code=201)
-    async def register_cell(body: CellRegistration) -> Cell:
+    async def register_cell(
+        body: CellRegistration, actor: Annotated[str, Depends(current_actor)]
+    ) -> Cell:
         if store.get_cell(body.cell_id) is not None:
             raise ApiError(409, "cell_exists", f"cell {body.cell_id} already exists")
         credential = body.credential or credentials.get(body.cell_id)
@@ -224,6 +264,7 @@ def create_app(
                 size=body.size,
                 capacity=body.capacity or settings.default_cell_capacity,
                 wave=body.wave,
+                actor=actor,
             )
         except DuplicateError as exc:  # pragma: no cover - concurrent register of the same id
             raise ApiError(409, "cell_exists", f"cell {body.cell_id} already exists") from exc
@@ -239,7 +280,9 @@ def create_app(
         return _cell(require_cell(cell_id))
 
     @admin.patch("/cells/{cell_id}")
-    def update_cell(cell_id: str, body: CellUpdate) -> Cell:
+    def update_cell(
+        cell_id: str, body: CellUpdate, actor: Annotated[str, Depends(current_actor)]
+    ) -> Cell:
         cell = require_cell(cell_id)
         tenants = int(str(cell["tenant_count"]))
         if body.capacity is not None and body.capacity < tenants:
@@ -248,7 +291,7 @@ def create_app(
                 "capacity_below_tenants",
                 f"{cell_id} hosts {tenants} tenants; capacity can't be lower than that",
             )
-        row = store.update_cell(cell_id, status=body.status, capacity=body.capacity)
+        row = store.update_cell(cell_id, status=body.status, capacity=body.capacity, actor=actor)
         return _cell(row or require_cell(cell_id))
 
     @admin.delete("/cells/{cell_id}", status_code=204)
@@ -327,7 +370,9 @@ def create_app(
         return tenant
 
     @admin.post("/tenants", status_code=201)
-    async def create_tenant(body: TenantCreate) -> Tenant:
+    async def create_tenant(
+        body: TenantCreate, actor: Annotated[str, Depends(current_actor)]
+    ) -> Tenant:
         tenant_id = body.tenant_id or f"t-{uuid.uuid4().hex[:12]}"
         if store.get_tenant(tenant_id) is not None:
             raise ApiError(409, "tenant_exists", f"tenant {tenant_id} already exists")
@@ -348,7 +393,7 @@ def create_app(
         # Placement and insert are not atomic; acceptable for a single control plane
         # instance (plan §2.1). A shared database needs a transactional reservation.
         try:
-            store.add_tenant(tenant_id, body.name, body.tier, decision.cell_id)
+            store.add_tenant(tenant_id, body.name, body.tier, decision.cell_id, actor)
         except DuplicateError as exc:  # pragma: no cover - concurrent create of the same id
             raise ApiError(409, "tenant_exists", f"tenant {tenant_id} already exists") from exc
 
@@ -362,7 +407,7 @@ def create_app(
                 502, "provisioning_failed", f"cell {decision.cell_id} did not provision the tenant"
             ) from exc
 
-        store.set_tenant_status(tenant_id, "active")
+        store.set_tenant_status(tenant_id, "active", actor)
         log.info("tenant %s placed on %s", tenant_id, decision.cell_id)
         return Tenant.model_validate(require_tenant(tenant_id))
 
