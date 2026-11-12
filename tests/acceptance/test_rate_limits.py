@@ -83,8 +83,7 @@ def test_a36_each_router_replica_enforces_its_share(platform: Platform) -> None:
 
     with platform.extra_router(router_replicas=2) as replica:
         codes = [
-            replica.get("/v1/items", headers={"X-Tenant-ID": "acme"}).status_code
-            for _ in range(3)
+            replica.get("/v1/items", headers={"X-Tenant-ID": "acme"}).status_code for _ in range(3)
         ]
 
     assert codes == [200, 200, 429]

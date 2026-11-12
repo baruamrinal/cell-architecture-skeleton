@@ -221,3 +221,4 @@ __marimo__/
 
 # cellctl-generated compose files for deployed cells (contain cell credentials)
 deploy/cells/
+tenant-data/
