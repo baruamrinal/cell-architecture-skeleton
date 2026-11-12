@@ -207,25 +207,6 @@ class TestSettings:
         assert settings.seed_cells == {"cell-1": "http://cell-1:8000"}
         assert (settings.default_cell_capacity, settings.target_utilization) == (50, 0.8)
 
-    @pytest.mark.parametrize(("value", "expected"), [(None, "isolated"), ("pooled", "pooled")])
-    def test_default_tenant_isolation(
-        self, monkeypatch: pytest.MonkeyPatch, value: str | None, expected: str
-    ) -> None:
-        monkeypatch.setenv("CONTROL_PLANE_ADMIN_TOKEN", "a")
-        monkeypatch.setenv("CONTROL_PLANE_ROUTER_TOKEN", "r")
-        if value is None:
-            monkeypatch.delenv("DEFAULT_TENANT_ISOLATION", raising=False)
-        else:
-            monkeypatch.setenv("DEFAULT_TENANT_ISOLATION", value)
-        assert ControlPlaneSettings.from_env().default_isolation == expected
-
-    def test_invalid_default_tenant_isolation(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("CONTROL_PLANE_ADMIN_TOKEN", "a")
-        monkeypatch.setenv("CONTROL_PLANE_ROUTER_TOKEN", "r")
-        monkeypatch.setenv("DEFAULT_TENANT_ISOLATION", "silo")
-        with pytest.raises(ConfigError, match="DEFAULT_TENANT_ISOLATION"):
-            ControlPlaneSettings.from_env()
-
     def test_seed_cell_without_credential_is_a_config_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -235,3 +216,95 @@ class TestSettings:
         monkeypatch.setenv("SEED_CELLS", "cell-1=http://cell-1:8000")
         with pytest.raises(ConfigError, match="cell-1"):
             ControlPlaneSettings.from_env()
+
+
+class FakeCellApi:
+    """A cell's /internal API with scripted answers."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.activate_status = 200
+        self.delete_status = 204
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.calls.append((request.method, request.url.path))
+        if request.url.path.endswith("/activate"):
+            body = {"error": "tenant_stack_not_ready"} if self.activate_status == 409 else {}
+            return httpx.Response(self.activate_status, json=body)
+        if request.method == "DELETE":
+            return httpx.Response(self.delete_status)
+        return httpx.Response(201, json={})
+
+
+class TestTenantHandshake:
+    @pytest.fixture
+    def cell(self) -> FakeCellApi:
+        return FakeCellApi()
+
+    @pytest.fixture
+    def client(self, tmp_path: Path, cell: FakeCellApi) -> TestClient:
+        return make_client(tmp_path, httpx.MockTransport(cell.handler))
+
+    def test_a_new_tenant_waits_for_its_stack(self, client: TestClient, cell: FakeCellApi) -> None:
+        created = client.post("/v1/tenants", json={"tenant_id": "acme", "name": "Acme"})
+        assert (created.status_code, created.json()["status"]) == (201, "provisioning")
+        assert "isolation" not in created.json()
+        assert cell.calls == [("POST", "/internal/tenants")]
+        routed = client.get("/v1/routing/tenants/acme").json()
+        assert routed["status"] == "provisioning"
+
+    def test_activation(self, client: TestClient, cell: FakeCellApi) -> None:
+        client.post("/v1/tenants", json={"tenant_id": "acme", "name": "Acme"})
+        activated = client.post("/v1/tenants/acme/activate")
+        assert (activated.status_code, activated.json()["status"]) == (200, "active")
+        assert cell.calls[-1] == ("POST", "/internal/tenants/acme/activate")
+        assert client.post("/v1/tenants/acme/activate").json()["status"] == "active"
+
+    def test_activation_before_the_stack_is_ready(
+        self, client: TestClient, cell: FakeCellApi
+    ) -> None:
+        client.post("/v1/tenants", json={"tenant_id": "acme", "name": "Acme"})
+        cell.activate_status = 409
+        response = client.post("/v1/tenants/acme/activate")
+        assert (response.status_code, response.json()["error"]) == (409, "tenant_stack_not_ready")
+        assert client.get("/v1/tenants/acme").json()["status"] == "provisioning"
+
+    def test_activation_when_the_cell_fails(self, client: TestClient, cell: FakeCellApi) -> None:
+        client.post("/v1/tenants", json={"tenant_id": "acme", "name": "Acme"})
+        cell.activate_status = 500
+        response = client.post("/v1/tenants/acme/activate")
+        assert (response.status_code, response.json()["error"]) == (502, "cell_unavailable")
+
+    def test_delete(self, client: TestClient, cell: FakeCellApi) -> None:
+        client.post("/v1/tenants", json={"tenant_id": "acme", "name": "Acme"})
+        assert client.delete("/v1/tenants/acme").status_code == 204
+        assert cell.calls[-1] == ("DELETE", "/internal/tenants/acme")
+        assert client.get("/v1/tenants/acme").status_code == 404
+        assert client.get("/v1/cells/cell-2").json()["tenant_count"] == 0
+
+    def test_delete_keeps_the_tenant_when_the_cell_fails(
+        self, client: TestClient, cell: FakeCellApi
+    ) -> None:
+        client.post("/v1/tenants", json={"tenant_id": "acme", "name": "Acme"})
+        cell.delete_status = 502
+        response = client.delete("/v1/tenants/acme")
+        assert (response.status_code, response.json()["error"]) == (502, "cell_unavailable")
+        assert client.get("/v1/tenants/acme").status_code == 200
+
+    @pytest.mark.parametrize("method", ["POST", "DELETE"])
+    def test_unknown_tenants(self, client: TestClient, method: str) -> None:
+        path = "/v1/tenants/nobody" + ("/activate" if method == "POST" else "")
+        response = client.request(method, path)
+        assert (response.status_code, response.json()["error"]) == (404, "tenant_not_found")
+
+
+def test_activation_when_the_cell_is_unreachable(tmp_path: Path) -> None:
+    def unreachable_on_activate(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/activate"):
+            raise httpx.ConnectError("cell is down")
+        return httpx.Response(201, json={})
+
+    client = make_client(tmp_path, httpx.MockTransport(unreachable_on_activate))
+    client.post("/v1/tenants", json={"tenant_id": "acme", "name": "Acme"})
+    response = client.post("/v1/tenants/acme/activate")
+    assert (response.status_code, response.json()["error"]) == (502, "cell_unavailable")

@@ -9,6 +9,9 @@ image:
 
 # Required: the credential the control plane uses for this cell's /internal API.
 # Locally `make up` / `cellctl cells deploy` set it; in production External Secrets.
+# The database server's admin password is generated in the cluster and kept across
+# upgrades; it never leaves the cell. An existingSecret needs both keys:
+# internal-token and postgres-password.
 secrets:
   create: true
   existingSecret: ""
@@ -25,3 +28,14 @@ gateway:
   resources:
     requests: {cpu: 50m, memory: 64Mi}
     limits: {cpu: 500m, memory: 256Mi}
+
+# The cell's database server: one database per tenant, a login per service.
+# Production: the cell's own Aurora Serverless v2 cluster.
+postgres:
+  image: postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+  persistence:
+    size: 2Gi
+    storageClass: ""
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}

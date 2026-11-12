@@ -182,3 +182,11 @@ def test_default_runner_runs_processes(tmp_path: Path) -> None:
     result = run_process(["python", "-c", "import sys; print(sys.stdin.read().upper())"], "hi")
     assert (result.code, result.stdout.strip()) == (0, "HI")
     assert 1024 < find_free_port() < 65536
+
+
+def test_helm_uninstall_waits_and_tolerates_missing_releases() -> None:
+    runner = FakeRunner()
+    toolkit(runner).helm_uninstall("cell-1", "tenant-acme")
+    command = runner.commands()[0]
+    assert command.startswith("helm uninstall tenant-acme --kube-context k3d-cellarch-cell-1")
+    assert "--ignore-not-found" in command and "--wait" in command

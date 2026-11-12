@@ -33,7 +33,8 @@ spec:
       labels:
         {{- include "cell.labels" (dict "root" . "component" "gateway") | nindent 8 }}
     spec:
-      automountServiceAccountToken: false
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: true   # writes tenant stack secrets (rbac.yaml)
       securityContext:
         fsGroup: 10001
       containers:
@@ -56,6 +57,17 @@ spec:
                   key: internal-token
             - name: MAX_CONCURRENT_REQUESTS
               value: {{ .Values.gateway.maxConcurrentRequests | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cell.secretName" . }}
+                  key: postgres-password
+            # The cell's database server, as its admin login.
+            - name: TENANT_DB_ADMIN_URL
+              value: "postgresql://postgres:$(POSTGRES_PASSWORD)@{{ include "cell.fullname" . }}-postgres:5432/postgres"
+            # Where each tenant's services answer (Services of the tenant-stack chart).
+            - name: TENANT_SERVICE_URL
+              value: "http://tenant-{tenant}-{service}:8000"
           livenessProbe:
             httpGet: {path: /healthz, port: http}
             periodSeconds: 10

@@ -49,7 +49,8 @@ RELEASE = "cellarch"
 TAG = "dev"
 IMAGES = ["router", "control-plane", "cell-gateway", "user-account", "order-processing"]
 PLATFORM_IMAGES = ["router", "control-plane"]
-CELL_IMAGES = ["cell-gateway"]
+# Every cell runs its gateway and its tenants' services.
+CELL_IMAGES = ["cell-gateway", "user-account", "order-processing"]
 ROUTER_PORT, CONTROL_PLANE_PORT = 8080, 8000
 
 Runner = Callable[[Sequence[str], Mapping[str, str]], int]
@@ -150,8 +151,6 @@ def platform_values(env: Mapping[str, str], seeds: Sequence[str]) -> dict[str, A
         control_plane["rateLimits"] = limits
     if env.get("DEFAULT_CELL_CAPACITY"):
         control_plane["defaultCellCapacity"] = int(env["DEFAULT_CELL_CAPACITY"])
-    if env.get("DEFAULT_TENANT_ISOLATION"):
-        control_plane["defaultTenantIsolation"] = env["DEFAULT_TENANT_ISOLATION"]
     router: dict[str, Any] = {"service": {"type": "LoadBalancer", "port": ROUTER_PORT}}
     if env.get("ROUTER_REPLICAS"):
         router["replicas"] = int(env["ROUTER_REPLICAS"])

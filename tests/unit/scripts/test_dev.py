@@ -66,6 +66,9 @@ class FakeClusters:
     ) -> None:
         self._record("helm", short, release, chart.name, dict(values), reuse_values)
 
+    def helm_uninstall(self, short: str, release: str) -> None:
+        self._record("uninstall", short, release)
+
     def node_ip(self, short: str) -> str:
         return f"172.20.0.{len(short)}"
 
@@ -193,7 +196,15 @@ class TestUp:
             "platform",
             ("cellarch/router:dev", "cellarch/control-plane:dev"),
         ) in clusters.calls
-        assert ("import", "cell-1", ("cellarch/cell-gateway:dev",)) in clusters.calls
+        assert (
+            "import",
+            "cell-1",
+            (
+                "cellarch/cell-gateway:dev",
+                "cellarch/user-account:dev",
+                "cellarch/order-processing:dev",
+            ),
+        ) in clusters.calls
 
         cell = clusters.helm("cell-1")
         assert cell[2:4] == ("cellarch", "cell")
@@ -238,14 +249,14 @@ class TestUp:
         make_venv(root)
         (root / ".env").write_text(
             "RATE_LIMIT_STANDARD=5:10\nDEFAULT_CELL_CAPACITY=8\nROUTER_REPLICAS=3\n"
-            "MAX_CONCURRENT_REQUESTS=40\nDEFAULT_TENANT_ISOLATION=pooled\n"
+            "MAX_CONCURRENT_REQUESTS=40\n"
         )
         clusters = FakeClusters()
         up(root, clusters)
         platform = clusters.helm("platform")[4]
         assert platform["controlPlane"]["rateLimits"] == {"standard": "5:10"}
         assert platform["controlPlane"]["defaultCellCapacity"] == 8
-        assert platform["controlPlane"]["defaultTenantIsolation"] == "pooled"
+        assert "defaultTenantIsolation" not in platform["controlPlane"]
         assert platform["router"]["replicas"] == 3
         assert clusters.helm("cell-1")[4]["gateway"] == {"maxConcurrentRequests": 40}
 

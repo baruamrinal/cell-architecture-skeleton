@@ -15,7 +15,7 @@ UNREACHABLE_REDIS = "redis://127.0.0.1:1/0"
 
 def codes(client: object, tenant_id: str, count: int) -> list[int]:
     return [
-        client.get("/v1/items", headers={"X-Tenant-ID": tenant_id}).status_code  # type: ignore[attr-defined]
+        client.get("/v1/users", headers={"X-Tenant-ID": tenant_id}).status_code  # type: ignore[attr-defined]
         for _ in range(count)
     ]
 

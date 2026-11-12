@@ -9,7 +9,8 @@ Cell lifecycle
     cellctl cells register cell-5 http://cell-5:8000 --credential <token>   (deployed elsewhere)
 
 Tenant lifecycle
-    cellctl tenants create acme --name "Acme" --tier premium
+    cellctl tenants create acme --name "Acme" --tier premium   place it, start its services
+    cellctl tenants delete acme                                 stop its services, delete its data
     cellctl tenants list | get acme
 
 Overview
@@ -34,6 +35,7 @@ from typing import Any
 
 import httpx
 
+from cellarch.cli.api import Api, CommandError, make_client
 from cellarch.cli.clusters import (
     ClusterError,
     ClusterToolkit,
@@ -41,9 +43,9 @@ from cellarch.cli.clusters import (
     cell_url,
     cluster_name,
 )
+from cellarch.cli.onboarding import offboard, onboard
 from cellarch.common.contracts import is_valid_tenant_id
 from cellarch.common.dotenv import load_env_file
-from cellarch.common.headers import ACTOR_HEADER, INTERNAL_TOKEN_HEADER
 
 DEFAULT_URL = "http://localhost:8000"
 DEFAULT_ROUTER_URL = "http://localhost:8080"
@@ -52,22 +54,8 @@ DEFAULT_CHARTS_DIR = "charts"
 EXIT_OK, EXIT_ERROR, EXIT_USAGE = 0, 1, 2
 
 
-class CommandError(Exception):
-    """An API call or step failed; reported as ``error: <code>: <message>``."""
-
-    def __init__(self, code: str, message: str, status: int | None = None) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.status = status
-
-
 class UsageError(Exception):
     """Invalid input detected after argument parsing (exit code 2)."""
-
-
-def make_client(url: str) -> httpx.Client:
-    return httpx.Client(base_url=url, timeout=30.0)
 
 
 def default_actor() -> str | None:
@@ -77,29 +65,6 @@ def default_actor() -> str | None:
     except Exception:  # getpass raises OSError/KeyError when no user name is available
         return None
     return _UNSAFE_ACTOR_CHARS.sub("-", user).strip("-")[:64] or None
-
-
-class Api:
-    def __init__(self, http: httpx.Client, token: str, actor: str | None = None) -> None:
-        self._http = http
-        self._headers = {INTERNAL_TOKEN_HEADER: token}
-        if actor:
-            self._headers[ACTOR_HEADER] = actor
-
-    def call(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
-        try:
-            response = self._http.request(method, path, json=body, headers=self._headers)
-        except httpx.HTTPError as exc:
-            raise CommandError("unreachable", f"cannot reach control plane: {exc}") from exc
-        data = response.json() if response.content else None
-        if response.status_code >= 400:
-            info = data if isinstance(data, dict) else {}
-            raise CommandError(
-                str(info.get("error", "error")),
-                str(info.get("message", response.text)),
-                response.status_code,
-            )
-        return data
 
 
 def _positive_int(value: str) -> int:
@@ -206,10 +171,10 @@ def _parser(settings: Mapping[str, str]) -> argparse.ArgumentParser:
     create.add_argument("--name")
     create.add_argument("--tier", choices=["standard", "premium"], default="standard")
     create.add_argument(
-        "--isolation",
-        choices=["isolated", "pooled"],
-        help="isolated: own database in its cell (default); pooled: shared tables",
+        "--charts-dir", default=settings.get("CELLCTL_CHARTS_DIR", DEFAULT_CHARTS_DIR)
     )
+    delete = tenants.add_parser("delete", help="stop a tenant's services and delete its data")
+    delete.add_argument("tenant_id")
 
     set_limit = tenants.add_parser(
         "set-limit", help="override a tenant's rate limit, or --clear to use its tier default"
@@ -271,18 +236,16 @@ def _request(args: argparse.Namespace) -> tuple[str, str, dict[str, Any] | None]
             if args.clear:
                 return "DELETE", path, None
             return "PUT", path, {"rps": args.rps, "burst": args.burst}
-        case _:  # ("tenants", "create") - argparse guarantees nothing else reaches here
-            body = {"tenant_id": args.tenant_id, "name": args.name or args.tenant_id}
-            body["tier"] = args.tier
-            if args.isolation:  # otherwise the control plane's default applies
-                body["isolation"] = args.isolation
-            return "POST", "/v1/tenants", body
+        case _:  # pragma: no cover - argparse guarantees nothing else reaches here
+            raise AssertionError(f"unhandled command {args.resource} {args.action}")
 
 
 # --- cell deploy / decommission (local k3d: one cluster per cell) -----------------------
 
 CELL_RELEASE = "cellarch"
 GATEWAY_IMAGE = "cellarch/cell-gateway:dev"
+# The tenants' services run in every cell cluster (tenant-stack chart).
+TENANT_IMAGES = ["cellarch/user-account:dev", "cellarch/order-processing:dev"]
 
 
 def _progress(message: str) -> None:
@@ -321,7 +284,7 @@ def _deploy(args: argparse.Namespace, api: Api, clusters: ClusterToolkit) -> Any
     try:
         _progress(f"Creating cluster {cluster_name(cell_id)}...")
         clusters.ensure_cluster(cell_id)
-        clusters.import_images(cell_id, [args.image])
+        clusters.import_images(cell_id, [args.image, *TENANT_IMAGES])
         _progress("Installing the cell chart and waiting until the gateway is ready...")
         values = {"cellId": cell_id, "secrets": {"internalToken": credential}}
         clusters.helm_upgrade(cell_id, CELL_RELEASE, chart, values)
@@ -421,13 +384,12 @@ def _render(args: argparse.Namespace, data: Any) -> str:
         return json.dumps(data, indent=2)
     if args.resource == "cells":
         return _cells_table(data)
-    header = ["TENANT", "NAME", "TIER", "ISOLATION", "CELL", "STATUS", "CREATED BY"]
+    header = ["TENANT", "NAME", "TIER", "CELL", "STATUS", "CREATED BY"]
     rows = [
         [
             t["tenant_id"],
             t["name"],
             t["tier"],
-            t["isolation"],
             t["cell_id"],
             t["status"],
             t["created_by"],
@@ -512,6 +474,15 @@ def main(
             data = _deploy(args, api, clusters or LocalClusters())
         elif action == ("cells", "decommission"):
             data = _decommission(args, api, clusters or LocalClusters())
+        elif action == ("tenants", "create"):
+            body = {"tenant_id": args.tenant_id, "name": args.name or args.tenant_id}
+            body["tier"] = args.tier
+            data = onboard(
+                api, clusters or LocalClusters(), Path(args.charts_dir), body, progress=_progress
+            )
+        elif action == ("tenants", "delete"):
+            offboard(api, clusters or LocalClusters(), args.tenant_id, progress=_progress)
+            return EXIT_OK
         else:
             data = api.call(*_request(args))
     except UsageError as exc:

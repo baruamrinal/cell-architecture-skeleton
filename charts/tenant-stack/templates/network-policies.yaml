@@ -1,0 +1,32 @@
+{{- /* Only the cell's gateway reaches a tenant's services; order-processing also reaches
+its own tenant's user-account. The cell chart denies everything else. */ -}}
+{{- $tenant := include "stack.tenant" . -}}
+{{- range $service := list "user-account" "order-processing" }}
+{{- $ctx := dict "root" $ "service" $service }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "stack.name" $ctx }}
+  labels:
+    {{- include "stack.labels" $ctx | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "stack.selector" $ctx | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: gateway
+              app.kubernetes.io/part-of: cellarch
+        {{- if eq $service "user-account" }}
+        - podSelector:
+            matchLabels:
+              cellarch.io/tenant: {{ $tenant }}
+              app.kubernetes.io/component: order-processing
+        {{- end }}
+      ports:
+        - {port: 8000, protocol: TCP}
+{{- end }}

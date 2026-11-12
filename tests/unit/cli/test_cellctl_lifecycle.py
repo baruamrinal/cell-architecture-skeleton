@@ -65,6 +65,9 @@ class FakeClusters:
     ) -> None:
         self._record("helm", short, chart.name, dict(values))
 
+    def helm_uninstall(self, short: str, release: str) -> None:
+        self._record("uninstall", short, release)
+
     def ensure_network(self) -> None:
         pass
 
@@ -212,7 +215,11 @@ class TestDeploy:
         )  # fmt: skip
         assert code == 1
         assert clusters.kinds()[:4] == ["cluster", "import", "helm", "dns"]
-        assert clusters.calls[1] == ("import", "cell-4", ("reg/cell-gateway:1.2",))
+        assert clusters.calls[1] == (
+            "import",
+            "cell-4",
+            ("reg/cell-gateway:1.2", "cellarch/user-account:dev", "cellarch/order-processing:dev"),
+        )
         helm = clusters.calls[2]
         assert (helm[1], helm[2], helm[3]["cellId"]) == ("cell-4", "cell", "cell-4")
         assert len(helm[3]["secrets"]["internalToken"]) >= 32  # generated
@@ -257,7 +264,9 @@ class TestDecommission:
         self, control_plane: TestClient, capsys: pytest.CaptureFixture[str]
     ) -> None:
         run(control_plane, "cells", "register", "cell-1", "http://cell-1")
-        run(control_plane, "tenants", "create", "acme")
+        run(
+            control_plane, "tenants", "create", "acme", clusters=FakeClusters({"cell-1": "running"})
+        )
         clusters = FakeClusters({"cell-1": "running"})
         assert run(control_plane, "cells", "decommission", "cell-1", clusters=clusters) == 1
         assert clusters.calls == []

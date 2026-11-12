@@ -35,7 +35,7 @@ Requires **Docker**, **Python 3.12**, **[k3d](https://k3d.io)** and **[Helm](htt
 
 ```powershell
 . .\make up                 # Windows (PowerShell). The leading dot keeps .venv activated afterwards.
-python scripts/demo.py      # onboard tenants, route, check isolation
+python scripts/demo.py      # onboard tenants (each with its own services), sign up users, place orders
 ```
 On macOS/Linux: `make up`, then `source .venv/bin/activate`.
 
@@ -73,11 +73,13 @@ If PowerShell says "running scripts is disabled", run `Set-ExecutionPolicy -Scop
 
 **Managing tenants and cells:** use the `cellctl` admin CLI; see [Admin CLI](#admin-cli-cellctl) below. The control plane's admin API is on `localhost:8000`, with API docs at `/docs`.
 
-**Calling the tenant API through the router** (`localhost:8080`):
+**Calling a tenant's services through the router** (`localhost:8080`), after `cellctl tenants create acme`:
 ```powershell
-curl -H "X-Tenant-ID: acme" -H "Content-Type: application/json" -d '{\"name\":\"first\"}' http://localhost:8080/v1/items
-curl -H "X-Tenant-ID: acme" http://localhost:8080/v1/items
+curl -H "X-Tenant-ID: acme" -H "Content-Type: application/json" -d '{\"email\":\"ana@acme.test\",\"name\":\"Ana\"}' http://localhost:8080/v1/users
+curl -H "X-Tenant-ID: acme" http://localhost:8080/v1/users
+curl -H "X-Tenant-ID: acme" -H "Content-Type: application/json" -d '{\"user_id\":\"<id from above>\",\"lines\":[{\"sku\":\"book-1\",\"quantity\":2,\"unit_price_cents\":1250}]}' http://localhost:8080/v1/orders
 ```
+`/v1/users` goes to the tenant's own `user-account` service and `/v1/orders` to its own `order-processing` service. Creates accept an `Idempotency-Key` header; lists return `{"items": [...], "next_cursor": ...}`.
 
 Stop everything with `.\make down`. To also delete all data, run `.\make clean`.
 
@@ -125,6 +127,7 @@ CELL LIFECYCLE
 
 TENANT LIFECYCLE
   cellctl tenants create <tenant-id> [--name NAME] [--tier standard|premium]
+  cellctl tenants delete <tenant-id>
   cellctl tenants list
   cellctl tenants get <tenant-id>
 
@@ -185,24 +188,29 @@ cellctl cells register cell-5 http://cell-5.cellarch.internal:8000 --credential 
 ```powershell
 cellctl tenants create acme --name "Acme Corp" --tier premium   # placed on a cell automatically
 cellctl tenants create globex                                   # name defaults to the ID
-cellctl tenants create trial-42 --isolation pooled              # shares tables (see below)
 cellctl tenants list
 cellctl tenants get acme
+cellctl tenants delete globex                                   # stops its services, deletes its data
 ```
 
 ```text
-TENANT    NAME       TIER      ISOLATION  CELL    STATUS  CREATED BY
-acme      Acme Corp  premium   isolated   cell-1  active  admin:mrinal
-globex    globex     standard  isolated   cell-1  active  admin:mrinal
-trial-42  trial-42   standard  pooled     cell-1  active  admin:mrinal
+TENANT  NAME       TIER      CELL    STATUS  CREATED BY
+acme    Acme Corp  premium   cell-1  active  admin:mrinal
+globex  globex     standard  cell-1  active  admin:mrinal
 ```
 
 Tenant IDs are 2–63 characters: lowercase letters, digits and hyphens, starting with a letter or digit (for example `acme`, `acme-eu`, `t-42`). `--tier` defaults to `standard`.
 
-**Data isolation:** tenants share cells up to each cell's capacity, but **each tenant gets its own database inside its cell** by default (`--isolation isolated`). In the cell's volume that's `tenants/<tenant-id>.db`.
-- `--isolation pooled` stores a tenant in shared tables instead, separated by `tenant_id`. It's meant for free, trial or demo tenants where cost and density matter more.
-- Removing an isolated tenant deletes its database.
-- Change the default with `DEFAULT_TENANT_ISOLATION` in `.env`.
+**Each tenant gets its own services and database.** Tenants share cells up to each cell's capacity, but `cellctl tenants create` gives every tenant:
+- its own `user-account` and `order-processing` containers in its cell's cluster (Helm release `tenant-<id>`, chart `charts/tenant-stack`), sized by tier;
+- its own database on the cell's Postgres server, with a login per service that reaches only that service's schema.
+
+Onboarding is a handshake, and any failure undoes every step:
+1. the control plane places the tenant (`provisioning`) and its cell creates the database, logins and the stack's Kubernetes Secret;
+2. `cellctl` installs the tenant's stack and waits for it;
+3. the tenant becomes `active`.
+
+`cellctl tenants delete` uninstalls the stack and drops the tenant's database, logins and secret.
 
 See [docs/plan.md §3.4](docs/plan.md).
 
