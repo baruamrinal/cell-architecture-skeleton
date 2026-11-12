@@ -38,7 +38,11 @@ def test_a16_a_running_cell_can_be_registered_with_its_credential(platform: Plat
 @pytest.mark.parametrize(
     ("body", "make_unreachable", "error"),
     [
-        ({"cell_id": "cell-3", "credential": "wrong-credential-value"}, False, "cell_credential_rejected"),
+        (
+            {"cell_id": "cell-3", "credential": "wrong-credential-value"},
+            False,
+            "cell_credential_rejected",
+        ),
         ({"cell_id": "cell-9", "credential": CELL_3_TOKEN}, False, "cell_id_mismatch"),
         ({"cell_id": "cell-3", "credential": CELL_3_TOKEN}, True, "cell_unreachable"),
     ],
@@ -145,6 +149,9 @@ class FakeDocker:
         if args[0] == "rm":
             self.platform.stop_cell(cell_id)
 
+    def volume_exists(self, name: str) -> bool:
+        return False
+
     def remove_volume(self, name: str) -> None:
         self.calls.append(("volume-rm", name))
 
@@ -192,7 +199,8 @@ def test_a23_cellctl_deploy_cleans_up_when_the_cell_does_not_come_up(
     code = cellctl(platform, docker, compose_file, "cells", "deploy", "cell-4")
 
     assert code == 1
-    assert docker.calls[-1][:2] == ("compose", "rm")
+    assert any(call[:2] == ("compose", "rm") for call in docker.calls)
+    assert ("volume-rm", "cellarch_cell-4-data") in docker.calls
     assert not (compose_file.parent / "cells" / "cell-4.yml").exists()
     assert platform.admin.get("/v1/cells/cell-4").status_code == 404
 
