@@ -47,6 +47,9 @@ services:
       DEFAULT_CELL_CAPACITY: "4"
       # Each tenant gets its own database in its cell unless onboarded as pooled.
       DEFAULT_TENANT_ISOLATION: ${DEFAULT_TENANT_ISOLATION:-isolated}
+      # Per-tier rate limits, "<requests per second>:<burst>"; overridable per tenant.
+      RATE_LIMIT_STANDARD: ${RATE_LIMIT_STANDARD:-50:100}
+      RATE_LIMIT_PREMIUM: ${RATE_LIMIT_PREMIUM:-500:1000}
     volumes: [control-plane-data:/data]
     ports: ["127.0.0.1:8000:8000"]
     healthcheck:
@@ -59,6 +62,8 @@ services:
     environment:
       CONTROL_PLANE_URL: http://control-plane:8000
       ROUTER_TOKEN: ${ROUTER_TOKEN:-dev-router-token}
+      # How many routers share the traffic; each enforces rate limit / replicas.
+      ROUTER_REPLICAS: ${ROUTER_REPLICAS:-1}
     ports: ["127.0.0.1:8080:8000"]
     depends_on:
       control-plane: { condition: service_healthy }

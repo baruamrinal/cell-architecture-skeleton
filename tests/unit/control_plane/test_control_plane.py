@@ -106,6 +106,9 @@ class TestStore:
             "cell_id": "cell-2",
             "cell_url": "http://cell-2",
             "status": "active",
+            "tier": "premium",
+            "rate_limit_rps": None,  # no override: the tier default applies
+            "rate_limit_burst": None,
         }
         assert [t["tenant_id"] for t in store.list_tenants()] == ["acme"]
 

@@ -31,7 +31,10 @@ CREATE TABLE IF NOT EXISTS tenants (
     updated_at     TEXT NOT NULL,
     created_by     TEXT NOT NULL DEFAULT 'unknown',
     updated_by     TEXT NOT NULL DEFAULT 'unknown',
-    isolation      TEXT NOT NULL DEFAULT 'pooled'
+    isolation      TEXT NOT NULL DEFAULT 'pooled',
+    -- Rate limit override; NULL means the tier default applies.
+    rate_limit_rps   REAL,
+    rate_limit_burst INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_tenants_cell ON tenants (cell_id);
 -- Decommissioned cells, so configuration seeding doesn't bring them back on restart.
@@ -51,6 +54,8 @@ _ADDED_COLUMNS = [
     ("tenants", "updated_by", "TEXT NOT NULL DEFAULT 'unknown'"),
     # Tenants created before the isolation tier all live in the cell's shared database.
     ("tenants", "isolation", "TEXT NOT NULL DEFAULT 'pooled'"),
+    ("tenants", "rate_limit_rps", "REAL"),
+    ("tenants", "rate_limit_burst", "INTEGER"),
 ]
 
 _CELLS_WITH_LOAD = """
@@ -212,6 +217,17 @@ class ControlPlaneStore:
     def assign_tenant(self, tenant_id: str, cell_id: str, actor: str = SYSTEM_ACTOR) -> None:
         self._update_tenant(tenant_id, "cell_id", cell_id, actor)
 
+    def set_rate_limit(
+        self, tenant_id: str, rps: float | None, burst: int | None, actor: str = SYSTEM_ACTOR
+    ) -> None:
+        """Set a tenant's rate limit override, or clear it with ``None``."""
+        with connect(self._db_path) as conn:
+            conn.execute(
+                "UPDATE tenants SET rate_limit_rps = ?, rate_limit_burst = ?, updated_at = ?, "
+                "updated_by = ? WHERE tenant_id = ?",
+                (rps, burst, utcnow(), actor, tenant_id),
+            )
+
     def delete_tenant(self, tenant_id: str) -> None:
         with connect(self._db_path) as conn:
             conn.execute("DELETE FROM tenants WHERE tenant_id = ?", (tenant_id,))
@@ -230,7 +246,8 @@ class ControlPlaneStore:
     def routing_entry(self, tenant_id: str) -> dict[str, Any] | None:
         with connect(self._db_path) as conn:
             row = conn.execute(
-                "SELECT t.tenant_id, t.cell_id, c.url AS cell_url, t.status "
+                "SELECT t.tenant_id, t.cell_id, c.url AS cell_url, t.status, t.tier, "
+                "t.rate_limit_rps, t.rate_limit_burst "
                 "FROM tenants t JOIN cells c ON c.cell_id = t.cell_id WHERE t.tenant_id = ?",
                 (tenant_id,),
             ).fetchone()

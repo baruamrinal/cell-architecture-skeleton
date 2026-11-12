@@ -504,6 +504,7 @@ All code, application and infrastructure, is written test-first.
 | Tenant data isolation | Per tenant: `isolated` (own database in its cell, **default**) or `pooled` (shared tables); tenants still share cells up to capacity (§3.4) |
 | Development approach | Test-driven development (red → green → refactor), outside-in per stage |
 | Rate-limit algorithm | Token bucket (no leaky bucket) |
+| Default rate limits | standard 50 requests/s burst 100, premium 500/s burst 1000 (`RATE_LIMIT_STANDARD` / `RATE_LIMIT_PREMIUM`); per-tenant override via `cellctl tenants set-limit`; limits travel in the routing entry |
 | Rate limiting across routers | In-memory with automatic N-router share + WAF rate rule; Redis-backed limiter built, off by default, fails open |
 | PR approver | `github-actions[bot]` policy gate (§9.1); no AI review, no secrets |
 | Control plane access | Never public; separate admin, router (read-only) and per-cell credentials; AWS: API Gateway HTTP API with IAM auth + VPC link, SSM for break-glass; `cellctl` CLI |

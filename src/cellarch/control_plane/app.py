@@ -12,7 +12,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Annotated
+from typing import Annotated, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, FastAPI, Header, Path, Response
@@ -28,6 +28,7 @@ from cellarch.common.contracts import (
     CellType,
     Isolation,
     PlacementMode,
+    RateLimit,
     RoutingEntry,
     TenantStatus,
     Tier,
@@ -76,6 +77,25 @@ def actor_label(role: str, actor: str | None) -> str:
 
 ROUTER_ROLE = "router"
 
+# Per-tier defaults: (requests per second, burst). Overridable per tenant.
+DEFAULT_TIER_LIMITS = {
+    "standard": RateLimit(rps=50, burst=100),
+    "premium": RateLimit(rps=500, burst=1000),
+}
+
+
+def parse_rate_limit(name: str, raw: str) -> RateLimit:
+    """Parse ``"<requests per second>:<burst>"``, e.g. ``"50:100"``."""
+    rps, separator, burst = raw.partition(":")
+    try:
+        if not separator:
+            raise ValueError
+        return RateLimit(rps=float(rps.strip()), burst=int(burst.strip()))
+    except ValueError as exc:  # pydantic's ValidationError is a ValueError too
+        raise ConfigError(
+            f"{name} must be '<requests per second>:<burst>', e.g. 50:100 (got {raw!r})"
+        ) from exc
+
 
 @dataclass(frozen=True)
 class ControlPlaneSettings:
@@ -88,6 +108,7 @@ class ControlPlaneSettings:
     target_utilization: float = 0.75
     # Each tenant gets its own database in its cell unless onboarded as pooled.
     default_isolation: Isolation = "isolated"
+    tier_limits: dict[str, RateLimit] = field(default_factory=lambda: dict(DEFAULT_TIER_LIMITS))
 
     @classmethod
     def from_env(cls) -> "ControlPlaneSettings":
@@ -105,6 +126,13 @@ class ControlPlaneSettings:
             default_cell_capacity=int(os.environ.get("DEFAULT_CELL_CAPACITY", "100")),
             target_utilization=float(os.environ.get("TARGET_UTILIZATION", "0.75")),
             default_isolation=_isolation(os.environ.get("DEFAULT_TENANT_ISOLATION", "isolated")),
+            tier_limits={
+                tier: parse_rate_limit(
+                    f"RATE_LIMIT_{tier.upper()}",
+                    os.environ.get(f"RATE_LIMIT_{tier.upper()}", f"{limit.rps:g}:{limit.burst}"),
+                )
+                for tier, limit in DEFAULT_TIER_LIMITS.items()
+            },
         )
 
 
@@ -151,6 +179,12 @@ class TenantCreate(BaseModel):
     isolation: Isolation | None = None  # default: ControlPlaneSettings.default_isolation
 
 
+class TenantRateLimit(BaseModel):
+    rps: float
+    burst: int
+    source: Literal["tier", "override"]
+
+
 class Tenant(BaseModel):
     tenant_id: str
     name: str
@@ -163,6 +197,7 @@ class Tenant(BaseModel):
     created_by: str
     updated_at: str
     updated_by: str
+    rate_limit: TenantRateLimit
 
 
 class StatusWarning(BaseModel):
@@ -380,6 +415,17 @@ def create_app(
 
     # --- admin API: tenants --------------------------------------------------------------
 
+    def effective_limit(row: dict[str, object]) -> tuple[RateLimit, Literal["tier", "override"]]:
+        rps, burst = row.get("rate_limit_rps"), row.get("rate_limit_burst")
+        if rps is not None and burst is not None:
+            return RateLimit(rps=float(str(rps)), burst=int(str(burst))), "override"
+        return settings.tier_limits[str(row["tier"])], "tier"
+
+    def tenant_out(row: dict[str, object]) -> Tenant:
+        limit, source = effective_limit(row)
+        rate_limit = {"rps": limit.rps, "burst": limit.burst, "source": source}
+        return Tenant.model_validate({**row, "rate_limit": rate_limit})
+
     def require_tenant(tenant_id: str) -> dict[str, object]:
         tenant = store.get_tenant(tenant_id)
         if tenant is None:
@@ -427,15 +473,33 @@ def create_app(
 
         store.set_tenant_status(tenant_id, "active", actor)
         log.info("tenant %s placed on %s", tenant_id, decision.cell_id)
-        return Tenant.model_validate(require_tenant(tenant_id))
+        return tenant_out(require_tenant(tenant_id))
 
     @admin.get("/tenants")
     def list_tenants() -> list[Tenant]:
-        return [Tenant.model_validate(t) for t in store.list_tenants()]
+        return [tenant_out(t) for t in store.list_tenants()]
 
     @admin.get("/tenants/{tenant_id}")
     def get_tenant(tenant_id: str) -> Tenant:
-        return Tenant.model_validate(require_tenant(tenant_id))
+        return tenant_out(require_tenant(tenant_id))
+
+    @admin.put("/tenants/{tenant_id}/rate-limit")
+    def set_tenant_rate_limit(
+        tenant_id: TenantId, body: RateLimit, actor: Annotated[str, Depends(current_actor)]
+    ) -> Tenant:
+        require_tenant(tenant_id)
+        store.set_rate_limit(tenant_id, body.rps, body.burst, actor)
+        log.info("rate limit of %s set to %s/s burst %s", tenant_id, body.rps, body.burst)
+        return tenant_out(require_tenant(tenant_id))
+
+    @admin.delete("/tenants/{tenant_id}/rate-limit")
+    def clear_tenant_rate_limit(
+        tenant_id: TenantId, actor: Annotated[str, Depends(current_actor)]
+    ) -> Tenant:
+        require_tenant(tenant_id)
+        store.set_rate_limit(tenant_id, None, None, actor)
+        log.info("rate limit override of %s cleared", tenant_id)
+        return tenant_out(require_tenant(tenant_id))
 
     # --- routing API (router: read-only) -------------------------------------------------
 
@@ -446,7 +510,8 @@ def create_app(
         entry = store.routing_entry(tenant_id)
         if entry is None:
             raise ApiError(404, "tenant_not_found", f"tenant {tenant_id} not found")
-        return RoutingEntry.model_validate(entry)
+        limit, _ = effective_limit(entry)
+        return RoutingEntry.model_validate({**entry, "rate_limit": limit.model_dump()})
 
     app.include_router(admin)
     app.include_router(routing)

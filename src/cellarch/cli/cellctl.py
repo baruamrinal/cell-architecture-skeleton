@@ -128,6 +128,13 @@ def _settings() -> dict[str, str]:
     return settings
 
 
+def _positive_float(value: str) -> float:
+    number = float(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be a positive number")
+    return number
+
+
 def _parser(settings: Mapping[str, str]) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cellctl", description="Control plane admin CLI")
     parser.add_argument("--url", default=settings.get("CELLCTL_URL", DEFAULT_URL))
@@ -194,6 +201,14 @@ def _parser(settings: Mapping[str, str]) -> argparse.ArgumentParser:
         help="isolated: own database in its cell (default); pooled: shared tables",
     )
 
+    set_limit = tenants.add_parser(
+        "set-limit", help="override a tenant's rate limit, or --clear to use its tier default"
+    )
+    set_limit.add_argument("tenant_id")
+    set_limit.add_argument("--rps", type=_positive_float, help="requests per second")
+    set_limit.add_argument("--burst", type=_positive_int, help="requests allowed at once")
+    set_limit.add_argument("--clear", action="store_true", help="remove the override")
+
     resources.add_parser("status", help="platform capacity overview and warnings")
     return parser
 
@@ -240,6 +255,11 @@ def _request(args: argparse.Namespace) -> tuple[str, str, dict[str, Any] | None]
             return "GET", "/v1/tenants", None
         case ("tenants", "get"):
             return "GET", f"/v1/tenants/{args.tenant_id}", None
+        case ("tenants", "set-limit"):
+            path = f"/v1/tenants/{args.tenant_id}/rate-limit"
+            if args.clear:
+                return "DELETE", path, None
+            return "PUT", path, {"rps": args.rps, "burst": args.burst}
         case _:  # ("tenants", "create") - argparse guarantees nothing else reaches here
             body = {"tenant_id": args.tenant_id, "name": args.name or args.tenant_id}
             body["tier"] = args.tier
@@ -417,7 +437,12 @@ def main(
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    args = _parser(settings).parse_args(argv)
+    parser = _parser(settings)
+    args = parser.parse_args(argv)
+    if getattr(args, "action", None) == "set-limit":
+        has_values = args.rps is not None or args.burst is not None
+        if args.clear == has_values or (has_values and (args.rps is None or args.burst is None)):
+            parser.error("set-limit needs both --rps and --burst, or --clear on its own")
 
     token = token or args.token
     if not token:

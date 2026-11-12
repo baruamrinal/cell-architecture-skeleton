@@ -90,6 +90,29 @@ class Platform:
     cell_clients: dict[str, TestClient]
     clock: FakeClock
     tmp_path: Path
+    router_mounts: dict[str, httpx.AsyncBaseTransport]
+
+    def extra_router(self, **settings: Any) -> TestClient:
+        """Another router on the same platform, e.g. one of several replicas."""
+        app = create_router(
+            RouterSettings(
+                control_plane_url=CONTROL_PLANE_URL,
+                router_token=ROUTER_TOKEN,
+                cache_ttl_seconds=ROUTE_CACHE_TTL,
+                **settings,
+            ),
+            http_client=httpx.AsyncClient(mounts=self.router_mounts),
+            clock=self.clock,
+        )
+        return TestClient(app, base_url="http://router-2")
+
+    def set_limit(self, tenant_id: str, rps: float, burst: int) -> dict[str, Any]:
+        response = self.admin.put(
+            f"/v1/tenants/{tenant_id}/rate-limit", json={"rps": rps, "burst": burst}
+        )
+        assert response.status_code == 200, response.text
+        result: dict[str, Any] = response.json()
+        return result
 
     def start_cell(self, cell_id: str, token: str) -> None:
         """Start a real cell app in a spare address slot (what `docker compose up` does)."""
@@ -163,15 +186,17 @@ def platform(tmp_path: Path) -> Iterator[Platform]:
     control_plane = Switch(control_plane_app)
 
     clock = FakeClock()
+    router_mounts: dict[str, httpx.AsyncBaseTransport] = {
+        **cell_mounts,
+        CONTROL_PLANE_URL: httpx.ASGITransport(app=control_plane),
+    }
     router_app = create_router(
         RouterSettings(
             control_plane_url=CONTROL_PLANE_URL,
             router_token=ROUTER_TOKEN,
             cache_ttl_seconds=ROUTE_CACHE_TTL,
         ),
-        http_client=httpx.AsyncClient(
-            mounts={**cell_mounts, CONTROL_PLANE_URL: httpx.ASGITransport(app=control_plane)}
-        ),
+        http_client=httpx.AsyncClient(mounts=router_mounts),
         clock=clock,
     )
 
@@ -193,4 +218,5 @@ def platform(tmp_path: Path) -> Iterator[Platform]:
             },
             clock=clock,
             tmp_path=tmp_path,
+            router_mounts=router_mounts,
         )

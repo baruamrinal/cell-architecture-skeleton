@@ -198,6 +198,24 @@ Tenant IDs are 2–63 characters: lowercase letters, digits and hyphens, startin
 
 See [docs/plan.md §3.4](docs/plan.md).
 
+**Rate limits:** the router limits each tenant's requests, so one tenant can't overload a shared cell.
+
+| Tier | Default limit |
+|---|---|
+| `standard` | 50 requests/s, bursts up to 100 |
+| `premium` | 500 requests/s, bursts up to 1000 |
+
+```powershell
+cellctl tenants set-limit acme --rps 200 --burst 400   # override for one tenant
+cellctl tenants set-limit acme --clear                  # back to the tier default
+cellctl tenants get acme                                # "rate_limit": {"rps", "burst", "source": tier|override}
+```
+- **Over the limit:** the router answers `429 rate_limited` with `Retry-After`, and the request never reaches the cell.
+- **Headers:** every response carries `X-RateLimit-Limit` (requests allowed at once), `X-RateLimit-Remaining` and `X-RateLimit-Reset` (seconds until the full allowance is back).
+- **When changes apply:** within 5 seconds, when the router refreshes its cached route. Limits keep working while the control plane is down.
+- **Tier defaults:** change them with `RATE_LIMIT_STANDARD` / `RATE_LIMIT_PREMIUM` in `.env`.
+- **Several routers:** set `ROUTER_REPLICAS`, and each router enforces its share (limit ÷ replicas).
+
 Moving tenants between cells (stage 3) and seasonal schedules (stage 4) will be added here.
 
 ### Platform overview
