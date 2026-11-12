@@ -24,7 +24,7 @@ from cellarch.common.headers import INTERNAL_TOKEN_HEADER, REQUEST_ID_HEADER, TE
 from cellarch.common.logging import configure_logging
 from cellarch.common.security import TokenAuth
 from cellarch.data_plane.router.metering import Metering
-from cellarch.data_plane.router.rate_limit import Decision, InMemoryRateLimiter, RateLimiter
+from cellarch.data_plane.router.rate_limit import Decision, RateLimiter, build_rate_limiter
 from cellarch.data_plane.router.routing import (
     RoutingCache,
     RoutingUnavailableError,
@@ -62,6 +62,11 @@ class RouterSettings:
     router_replicas: int = 1
     # Guards /_router/stats (it lists tenant ids). Without it, stats are switched off.
     metrics_token: str | None = None
+    # memory (default) or redis: one shared bucket per tenant across all routers.
+    rate_limit_backend: str = "memory"
+    redis_url: str | None = None
+    redis_timeout_seconds: float = 0.05  # keep Redis from slowing requests when it's down
+    rate_limit_key_prefix: str = "cellarch:rl:"
 
     @classmethod
     def from_env(cls) -> "RouterSettings":
@@ -72,6 +77,8 @@ class RouterSettings:
             request_timeout_seconds=float(os.environ.get("REQUEST_TIMEOUT_SECONDS", "10")),
             router_replicas=int(os.environ.get("ROUTER_REPLICAS", "1")),
             metrics_token=os.environ.get("ROUTER_METRICS_TOKEN") or None,
+            rate_limit_backend=os.environ.get("RATE_LIMIT_BACKEND", "memory"),
+            redis_url=os.environ.get("REDIS_URL") or None,
         )
 
 
@@ -109,7 +116,7 @@ def create_app(
     http = http_client or httpx.AsyncClient(timeout=settings.request_timeout_seconds)
     cache = RoutingCache(settings.cache_ttl_seconds, clock=clock)
     resolver = TenantResolver(http, settings.control_plane_url, settings.router_token, cache)
-    limiter = rate_limiter or InMemoryRateLimiter(clock=clock, replicas=settings.router_replicas)
+    limiter = rate_limiter or build_rate_limiter(settings, clock)
     metering = Metering()
 
     @asynccontextmanager

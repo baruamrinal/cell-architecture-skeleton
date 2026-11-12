@@ -78,4 +78,11 @@ What each delivery stage must do, in plain language. The precise, executable ver
 | A38 | tenants sending requests through the router, some throttled | the router's usage stats are read | each known tenant's requests, throttled requests and responses by class (2xx/4xx/5xx) are counted; unknown tenant IDs are not tracked; reading stats needs the router's metrics token |
 | A39 | a cell already handling its maximum number of requests at once | another request arrives | it is rejected immediately with `503 cell_overloaded` and `Retry-After`, while `/healthz` still answers |
 
+### Shared rate limiter (Redis)
+
+| ID | Given | When | Then |
+|---|---|---|---|
+| A40 | a router with the Redis limiter switched on, but Redis down | a tenant sends requests | requests are still limited by the router's own in-memory limiter (fail-open: traffic never stops because Redis is down) |
+| A41 | two routers sharing one Redis | a tenant with a burst of 4 sends requests through both | the routers share one bucket: 4 requests in total succeed, the next is throttled (runs when `REDIS_URL` points at a Redis; skipped otherwise) |
+
 Stage 1 also has a demo acceptance check: `scripts/demo.py` runs end-to-end against the in-process platform (`tests/acceptance/test_demo.py`) and against the real compose stack in CI (`compose-smoke`).

@@ -66,6 +66,10 @@ services:
       ROUTER_REPLICAS: ${ROUTER_REPLICAS:-1}
       # Guards /_router/stats (per-tenant usage); read by `cellctl usage`.
       ROUTER_METRICS_TOKEN: ${ROUTER_METRICS_TOKEN:-dev-metrics-token}
+      # memory (default) or redis: all routers share one bucket per tenant.
+      # For redis, also start the profile: COMPOSE_PROFILES=redis. Fails open if Redis is down.
+      RATE_LIMIT_BACKEND: ${RATE_LIMIT_BACKEND:-memory}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     ports: ["127.0.0.1:8080:8000"]
     depends_on:
       control-plane: { condition: service_healthy }
@@ -90,6 +94,25 @@ services:
       CELL_INTERNAL_TOKEN: ${CELL_2_TOKEN:-dev-cell-2-token}
       MAX_CONCURRENT_REQUESTS: ${MAX_CONCURRENT_REQUESTS:-100}
     volumes: [cell-2-data:/data]
+
+  # Shared rate-limiter state (opt-in: COMPOSE_PROFILES=redis). In memory only: the
+  # buckets are disposable, so nothing is persisted.
+  redis:
+    image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
+    profiles: [redis]
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    user: "999:999"
+    read_only: true
+    tmpfs: [/data]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    networks: [platform]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
 volumes:
   control-plane-data:

@@ -504,6 +504,7 @@ All code, application and infrastructure, is written test-first.
 | Tenant data isolation | Per tenant: `isolated` (own database in its cell, **default**) or `pooled` (shared tables); tenants still share cells up to capacity (§3.4) |
 | Development approach | Test-driven development (red → green → refactor), outside-in per stage |
 | Rate-limit algorithm | Token bucket (no leaky bucket) |
+| Shared rate limiter | `RATE_LIMIT_BACKEND=redis`: atomic Lua token bucket using Redis's clock, one bucket per tenant shared by all routers (full limit, not split); fails open to the in-memory limiter with a 5 s circuit breaker and 50 ms Redis timeouts; local `redis` compose profile; ElastiCache on AWS (stage 5) |
 | Usage metering | Router counts requests, throttles and status classes per known tenant (in memory, per replica); `/_router/stats` behind a separate metrics token; `cellctl usage` |
 | Cell request cap | `MAX_CONCURRENT_REQUESTS` (default 100) per cell; over it, `503 cell_overloaded` immediately, no queueing; `/healthz` exempt |
 | Default rate limits | standard 50 requests/s burst 100, premium 500/s burst 1000 (`RATE_LIMIT_STANDARD` / `RATE_LIMIT_PREMIUM`); per-tenant override via `cellctl tenants set-limit`; limits travel in the routing entry |
