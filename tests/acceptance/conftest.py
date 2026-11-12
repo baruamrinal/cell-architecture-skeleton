@@ -34,6 +34,7 @@ UNCONFIGURED_CELL_TOKENS = {"cell-3": "test-cell-3-token"}
 SPARE_CELL_IDS = ("cell-4",)
 CONTROL_PLANE_URL = "http://control-plane"
 ROUTE_CACHE_TTL = 5.0
+METRICS_TOKEN = "test-metrics-token"
 
 
 @dataclass
@@ -195,6 +196,7 @@ def platform(tmp_path: Path) -> Iterator[Platform]:
             control_plane_url=CONTROL_PLANE_URL,
             router_token=ROUTER_TOKEN,
             cache_ttl_seconds=ROUTE_CACHE_TTL,
+            metrics_token=METRICS_TOKEN,
         ),
         http_client=httpx.AsyncClient(mounts=router_mounts),
         clock=clock,
