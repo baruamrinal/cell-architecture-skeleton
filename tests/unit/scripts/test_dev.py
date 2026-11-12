@@ -114,6 +114,11 @@ class TestVenv:
             [python, "-m", "pip", "install", "--quiet", "-e", ".[dev]"],
         ]
 
+    def test_stops_when_the_venv_cannot_be_created(self, root: Path) -> None:
+        run = FakeRunner(fail_on="venv")
+        assert dev.ensure_venv(root, run, python="system-python") == 1
+        assert len(run.commands) == 1  # no install attempted
+
     def test_skips_install_when_up_to_date(self, root: Path) -> None:
         make_venv(root)
         run = FakeRunner()
@@ -146,9 +151,9 @@ class TestVenv:
     def test_venv_python_path_per_platform(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(dev.os, "name", "nt")
+        monkeypatch.setattr("dev.os.name", "nt")
         assert dev.venv_python(root) == root / ".venv" / "Scripts" / "python.exe"
-        monkeypatch.setattr(dev.os, "name", "posix")
+        monkeypatch.setattr("dev.os.name", "posix")
         assert dev.venv_python(root) == root / ".venv" / "bin" / "python"
 
 
@@ -225,9 +230,7 @@ class TestTargets:
         dev.main(["setup"], root=root, run=run)
         assert len(run.commands) == 2
 
-    def test_bad_env_file_is_reported(
-        self, root: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_bad_env_file_is_reported(self, root: Path, capsys: pytest.CaptureFixture[str]) -> None:
         (root / ".env").write_text("not valid\n")
         assert dev.main(["down"], root=root, run=FakeRunner()) == 2
         assert ".env line 1" in capsys.readouterr().err

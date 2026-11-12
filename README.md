@@ -29,15 +29,34 @@ Later stages are listed in [docs/plan.md §13](docs/plan.md).
 
 ## Quick start
 
-Requires Docker, plus Python 3.12 for the demo and CLI.
+Requires Docker and Python 3.12. From the project folder:
 
 ```powershell
-python -m venv .venv; .venv\Scripts\Activate.ps1    # macOS/Linux: source .venv/bin/activate
-pip install -e ".[dev]"
-
-docker compose -f deploy/docker-compose.yml up --build -d --wait
-python scripts/demo.py                              # onboard tenants, route, check isolation
+. .\make up                 # Windows (PowerShell). The leading dot keeps .venv activated afterwards.
+python scripts/demo.py      # onboard tenants, route, check isolation
 ```
+On macOS/Linux: `make up`, then `source .venv/bin/activate`.
+
+`make up` does everything in one step:
+1. creates `.venv` and installs the project if needed, then activates it;
+2. loads settings from `.env` if it exists;
+3. builds the image;
+4. starts all containers, **including cells added with `cellctl cells deploy`**;
+5. waits until they're healthy;
+6. shows `cellctl status`.
+
+| Command | What it does |
+|---|---|
+| `.\make up` | Set up, build and start everything (rebuilds after code changes) |
+| `.\make down` | Stop and remove the containers; data is kept |
+| `.\make status` | Platform status (`cellctl status`) |
+| `.\make build` | Build the image only |
+| `.\make test` | Run the test suite with coverage |
+| `.\make setup` | Reinstall the project into `.venv` |
+
+**Settings:** copy [.env.example](.env.example) to `.env` to change tokens or include extra compose files, e.g. `EXTRA_COMPOSE_FILES=deploy/cell-3.override.yml`. `.env` is git-ignored. Without it, development defaults are used.
+
+If PowerShell says "running scripts is disabled", run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
 
 **Managing tenants and cells:** use the `cellctl` admin CLI; see [Admin CLI](#admin-cli-cellctl) below. The control plane's admin API is on `localhost:8000`, with API docs at `/docs`.
 
@@ -47,7 +66,7 @@ curl -H "X-Tenant-ID: acme" -H "Content-Type: application/json" -d '{\"name\":\"
 curl -H "X-Tenant-ID: acme" http://localhost:8080/v1/items
 ```
 
-Stop and remove everything with `docker compose -f deploy/docker-compose.yml down -v`.
+Stop everything with `.\make down`. To also delete all data, run `docker compose -f deploy/docker-compose.yml down -v`.
 
 ## Admin CLI (`cellctl`)
 
@@ -231,6 +250,7 @@ src/cellarch/
 tests/acceptance/          stage acceptance tests against the in-process platform
 tests/unit/                unit tests per component
 scripts/demo.py            end-to-end walkthrough (also the compose smoke test)
+scripts/dev.py             local tasks behind make.ps1 (Windows) and Makefile (macOS/Linux)
 scripts/ci/pr_gate.py      PR policy gate
 deploy/docker-compose.yml  local platform
 Dockerfile                 one image for every component

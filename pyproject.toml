@@ -56,7 +56,7 @@ target-version = "py312"
 select = ["E", "F", "W", "I", "B", "UP", "S", "SIM"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["cellarch", "pr_gate", "demo"]
+known-first-party = ["cellarch", "pr_gate", "demo", "dev"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106"]  # asserts and fake test credentials
