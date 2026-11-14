@@ -245,6 +245,21 @@ Roadmap: near-zero-downtime moves via live replication / change data capture.
 - **Drain:** a `draining` cell receives no new tenants.
 - **Consolidate:** move all tenants out of an under-used cell, then decommission it (cost saving).
 
+All four operations below are `cellctl` workflows on top of the move procedure: only the operator's tool creates clusters and installs Helm releases.
+
+| Command | What it does |
+|---|---|
+| `cellctl tenants promote acme [--cell cell-acme] [--size medium]` | Deploys a dedicated cell (capacity 1) and moves the tenant there. If the move fails, the new cell is removed again |
+| `cellctl tenants demote acme [--delete-data]` | Moves the tenant to a shared cell chosen by placement, then decommissions its dedicated cell. Refused (nothing changes) when no shared cell has room |
+| `cellctl cells drain cell-1` | Sets the cell `draining`, then moves its tenants out one at a time, each to a cell chosen by placement |
+| `cellctl cells consolidate cell-3 [--delete-data]` | Drains a shared cell, then decommissions it |
+
+- **Room is checked first:** drain and consolidate refuse up front (`no_capacity`) when the other shared active cells can't take every tenant, and refuse a cell with tenants that aren't `active` (`tenant_not_active`), so they never stop half-way for a reason known in advance.
+- **A failure stops the drain:** that tenant's move is rolled back as usual, the drain reports the tenants left, and running it again carries on with them.
+- **A dedicated cell holds exactly one tenant:** it is registered with capacity 1 (any other capacity is refused), placement never puts new tenants on it, and a move into it needs it empty.
+- **`placement_mode` follows the cell:** the switch step sets it to `dedicated` on a dedicated cell and `pooled` on a shared one.
+- **Defaults:** the dedicated cell is `cell-<tenant>`; demote and consolidate stop the emptied cell's cluster and keep its data, like `cells decommission` (`--delete-data` removes it).
+
 ---
 
 ## 6. Seasonal scaling
@@ -529,7 +544,7 @@ Stack: Python 3.12, FastAPI, httpx, pydantic, pytest. SQLite locally, Aurora Pos
 | 2 | Traffic protection | `RateLimiter` interface, in-memory token bucket with automatic N-router share, Redis-backed limiter (off by default, fails open), tier and override limits, metering, cell request cap. WAF rate rule follows in stage 5. |
 | 2.5 | Tenant services | Cell gateway; per-tenant `user-account` and `order-processing` containers; one Postgres server per cell with a database per tenant and a schema and login per service; onboarding handshake and tenant delete; replaces the sample `items` API and the isolation tier (§3.4) |
 | 2.6 | Kubernetes runtime | One image per service; Helm charts (`platform`, `cell`, `tenant-stack` and per service) tested with lint, schema validation and helm-unittest; local k3d clusters (platform + one per cell); `make up` and `cellctl` driving Helm; CI smoke test on k3d; Docker Compose retired (§8.5) |
-| 3 | Tenant moves | Move procedure (start the tenant's stack on the target cell, copy its database, switch), promote/demote, drain, consolidate, audit log |
+| 3 | Tenant moves | **3a:** move procedure (start the tenant's stack on the target cell, copy its database, switch, roll back) and audit log. **3b:** promote/demote, drain, consolidate |
 | 4 | Seasonal scaling | Schedules, scheduler, standby-pool provisioner, season limits. (Local cell deploy/decommission via `cellctl` was pulled forward into stage 1; stage 4 builds the scheduler-driven provisioner on top.) |
 | 5 | Infrastructure | Terraform bootstrap, modules, platform and cell stacks (an **EKS cluster and Aurora cluster per cell**, a platform EKS cluster), dev environment, security guardrails, control plane admin access (API Gateway + IAM, SSM runbook), `cellctl` IAM signing, Terraform checks in CI |
 | 6 | Delivery automation | **Argo CD** (ApplicationSets, cell-by-cell waves), External Secrets, `cd.yml` building and signing images, `cell-lifecycle.yml`, GitHub-workflow provisioner, `drift.yml` |
@@ -626,5 +641,6 @@ All code, application and infrastructure, is written test-first.
 | Customer-hosted cells | Built in v1 (model 3); fully self-hosted later |
 | Tenant stacks in a cell | The cell gateway creates each tenant's database and a login per service on the cell's Postgres (a schema per service, connection limit, statement timeout) and writes the stack's Kubernetes Secret (its service account may create, replace and delete Secrets, never read them); `cellctl` installs the `tenant-stack` release and activates the tenant; the gateway forwards `/v1/users` and `/v1/orders` with the tenant's stack credential. The cell's Postgres admin password is generated in the cluster and never leaves it. Replaces the sample `items` API and the pooled/isolated tier |
 | Tenant moves | A move is a control-plane record with fixed states (`started` → `copied` → `switched` → `completed`, or `rolled_back`), driven step by step by `cellctl` (Helm installs) like onboarding. The copy is a logical JSON-lines export through the storage interface (works on SQLite and Postgres, keeps keys, refuses a schema-version mismatch), relayed by the control plane because cells never call each other; pre-signed S3 URLs on AWS (stage 5) so data bypasses the control plane. The router and the frozen source both pause writes; the source is never unfrozen after the switch. `pg_dump` was rejected: it needs Postgres client tools in the gateway image and can't run against the in-process stand-in |
+| Dedicated cells | One tenant per dedicated cell (capacity 1, enforced at registration and on moves); `placement_mode` is set by the switch from the target cell's type. Promote, demote, drain and consolidate are `cellctl` workflows over the move procedure, with up-front room checks |
 | Audit log | Control-plane table of every admin change and move step (actor, action, tenant, cell, outcome, detail, time), newest first via `GET /v1/audit` with cursor pagination. CloudWatch Logs copy on AWS (stage 5) |
 | Tenant service storage | One `Database` interface (`common/sql.py`) chosen by `DATABASE_URL`: PostgreSQL (psycopg 3) in cells and on Aurora, SQLite as the in-process stand-in. Portable SQL (`?` placeholders, dict rows, `{seq_pk}` identity keys), driver errors mapped to `IntegrityError` / `DatabaseError`, migrations serialised by a per-namespace lock (Postgres advisory lock). Postgres major version 17 to match Aurora |

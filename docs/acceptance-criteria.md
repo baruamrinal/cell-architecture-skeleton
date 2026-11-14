@@ -131,3 +131,15 @@ One procedure moves a tenant from one cell to another (docs/plan.md §5): promot
 | ID | Given | When | Then |
 |---|---|---|---|
 | A65 | admin changes: cells registered and changed, tenants created and deleted, rate limits set, every move step | they succeed, are refused or fail | each is in `GET /v1/audit` with who, what, the tenant and cells, the outcome and the time, newest first, with cursor pagination and filters by tenant and cell; `cellctl audit` prints it |
+
+### Promote, demote, drain, consolidate
+
+Operations built on the move procedure (docs/plan.md §5.1).
+
+| ID | Given | When | Then |
+|---|---|---|---|
+| A66 | a pooled tenant with data on a shared cell | it is promoted (`cellctl tenants promote`) | a dedicated cell with capacity 1 is deployed and the tenant is moved there with its data, now `dedicated`; if the move fails, the tenant stays where it was and the new cell is removed again |
+| A67 | a tenant on a dedicated cell | it is demoted (`cellctl tenants demote`) | it is moved to a shared cell chosen by placement, `pooled` again with its data, and its dedicated cell is decommissioned; with no room on any shared cell the demote is refused and nothing changes |
+| A68 | a shared cell with several tenants | it is drained (`cellctl cells drain`) | it becomes `draining`, every tenant is moved to another cell with its data and new tenants never land on it; it is refused up front when the other cells lack room; after a failure part-way, running it again moves the rest |
+| A69 | an under-used shared cell | it is consolidated (`cellctl cells consolidate`) | its tenants are moved off with their data, then it is decommissioned |
+| A70 | a dedicated cell | it is registered with a capacity other than 1, a second tenant is moved into it, or a new tenant is onboarded | each is refused, or the new tenant is placed on a shared cell |

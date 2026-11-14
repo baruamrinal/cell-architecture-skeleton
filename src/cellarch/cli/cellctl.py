@@ -13,6 +13,12 @@ Tenant lifecycle
     cellctl tenants delete acme                                 stop its services, delete its data
     cellctl tenants list | get acme
     cellctl tenants move acme --to cell-2                       move it to another cell
+    cellctl tenants promote acme [--cell cell-acme] [--size medium]   its own dedicated cell
+    cellctl tenants demote acme [--delete-data]                 back to a shared cell
+
+Cell operations
+    cellctl cells drain cell-1                       no new tenants; move its tenants out
+    cellctl cells consolidate cell-3 [--delete-data] drain, then decommission
 
 Moves and audit log
     cellctl moves list [--tenant acme] | show <move>
@@ -34,7 +40,6 @@ import getpass
 import json
 import os
 import re
-import secrets
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -45,16 +50,11 @@ from urllib.parse import urlencode
 import httpx
 
 from cellarch.cli.api import Api, CommandError, make_client
-from cellarch.cli.clusters import (
-    ClusterError,
-    ClusterToolkit,
-    LocalClusters,
-    cell_url,
-    cluster_name,
-)
+from cellarch.cli.cells import GATEWAY_IMAGE, UsageError, decommission_cell, deploy_cell
+from cellarch.cli.clusters import ClusterError, ClusterToolkit, LocalClusters
 from cellarch.cli.moves import move, rollback
 from cellarch.cli.onboarding import offboard, onboard
-from cellarch.common.contracts import is_valid_tenant_id
+from cellarch.cli.operations import consolidate, demote, drain, promote
 from cellarch.common.dotenv import load_env_file
 
 DEFAULT_URL = "http://localhost:8000"
@@ -62,10 +62,6 @@ DEFAULT_ROUTER_URL = "http://localhost:8080"
 _UNSAFE_ACTOR_CHARS = re.compile(r"[^A-Za-z0-9._@-]+")
 DEFAULT_CHARTS_DIR = "charts"
 EXIT_OK, EXIT_ERROR, EXIT_USAGE = 0, 1, 2
-
-
-class UsageError(Exception):
-    """Invalid input detected after argument parsing (exit code 2)."""
 
 
 def default_actor() -> str | None:
@@ -170,6 +166,16 @@ def _parser(settings: Mapping[str, str]) -> argparse.ArgumentParser:
     decommission.add_argument(
         "--delete-data", action="store_true", help="also delete the cell's data volume"
     )
+    cells.add_parser(
+        "drain", help="stop placing tenants on a cell and move its tenants out"
+    ).add_argument("cell_id")
+    consolidate_cell = cells.add_parser(
+        "consolidate", help="move a shared cell's tenants out, then decommission it"
+    )
+    consolidate_cell.add_argument("cell_id")
+    consolidate_cell.add_argument(
+        "--delete-data", action="store_true", help="also delete the cell's data volume"
+    )
 
     tenants = resources.add_parser("tenants", help="manage tenants").add_subparsers(
         dest="action", required=True
@@ -190,6 +196,20 @@ def _parser(settings: Mapping[str, str]) -> argparse.ArgumentParser:
     move_tenant.add_argument("--to", dest="target", help="target cell (default: placement chooses)")
     move_tenant.add_argument(
         "--charts-dir", default=settings.get("CELLCTL_CHARTS_DIR", DEFAULT_CHARTS_DIR)
+    )
+    promote_tenant = tenants.add_parser(
+        "promote", help="deploy a dedicated cell for a tenant and move it there"
+    )
+    promote_tenant.add_argument("tenant_id")
+    promote_tenant.add_argument("--cell", help="the dedicated cell's id (default: cell-<tenant>)")
+    promote_tenant.add_argument("--size", choices=["small", "medium", "large"], default="small")
+    promote_tenant.add_argument("--image", default=GATEWAY_IMAGE, help=f"default: {GATEWAY_IMAGE}")
+    demote_tenant = tenants.add_parser(
+        "demote", help="move a tenant back to a shared cell and remove its dedicated cell"
+    )
+    demote_tenant.add_argument("tenant_id")
+    demote_tenant.add_argument(
+        "--delete-data", action="store_true", help="also delete the dedicated cell's data"
     )
 
     set_limit = tenants.add_parser(
@@ -281,22 +301,11 @@ def _request(args: argparse.Namespace) -> tuple[str, str, dict[str, Any] | None]
             raise AssertionError(f"unhandled command {args.resource} {args.action}")
 
 
-# --- cell deploy / decommission (local k3d: one cluster per cell) -----------------------
-
-CELL_RELEASE = "cellarch"
-GATEWAY_IMAGE = "cellarch/cell-gateway:dev"
-# The control plane may not resolve a new cell's name until cluster DNS settles.
-REGISTER_ATTEMPTS, REGISTER_DELAY_SECONDS = 21, 3.0
-# The tenants' services run in every cell cluster (tenant-stack chart).
-TENANT_IMAGES = ["cellarch/user-account:dev", "cellarch/order-processing:dev"]
+# --- cell deploy / decommission (local k3d: one cluster per cell, see cells.py) -------
 
 
 def _progress(message: str) -> None:
     print(message, file=sys.stderr)
-
-
-def _sync_cell_dns(clusters: ClusterToolkit) -> None:
-    clusters.set_cell_dns({cell: clusters.node_ip(cell) for cell in clusters.cell_ids()})
 
 
 def _deploy(
@@ -305,84 +314,16 @@ def _deploy(
     clusters: ClusterToolkit,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Any:
-    cell_id = args.cell_id
-    if not is_valid_tenant_id(cell_id):
-        raise UsageError(
-            f"invalid cell id {cell_id!r}: use 2-63 lowercase letters, digits and hyphens"
-        )
-    chart = Path(args.charts_dir) / "cell"
-    if not chart.is_dir():
-        raise UsageError(
-            f"chart not found: {chart} (run from the project folder or pass --charts-dir)"
-        )
-    try:
-        api.call("GET", f"/v1/cells/{cell_id}")
-    except CommandError as exc:
-        if exc.status != 404:
-            raise
-    else:
-        raise CommandError("cell_exists", f"cell {cell_id} is already registered", 409)
-    if cell_id in clusters.clusters():
-        raise CommandError(
-            "cell_cluster_exists",
-            f"cluster {cluster_name(cell_id)} already exists; decommission it first",
-        )
-
-    credential = secrets.token_urlsafe(32)
-    try:
-        _progress(f"Creating cluster {cluster_name(cell_id)}...")
-        clusters.ensure_cluster(cell_id)
-        clusters.import_images(cell_id, [args.image, *TENANT_IMAGES])
-        _progress("Installing the cell chart and waiting until the gateway is ready...")
-        values = {"cellId": cell_id, "secrets": {"internalToken": credential}}
-        clusters.helm_upgrade(cell_id, CELL_RELEASE, chart, values)
-        _sync_cell_dns(clusters)
-        _progress(f"Registering {cell_id} with the control plane...")
-        body = {**_cell_body(args, cell_url(cell_id)), "credential": credential}
-        attempt = 1
-        while True:
-            try:
-                cell = api.call("POST", "/v1/cells", body)
-                break
-            except CommandError as exc:
-                if exc.code != "cell_unreachable" or attempt == REGISTER_ATTEMPTS:
-                    raise
-                attempt += 1
-                sleep(REGISTER_DELAY_SECONDS)
-    except (CommandError, ClusterError):
-        _progress(f"Deploy failed; removing cluster {cluster_name(cell_id)}...")
-        try:
-            clusters.delete(cell_id)
-            _sync_cell_dns(clusters)
-        except ClusterError as cleanup_error:
-            _progress(f"warning: cleanup incomplete: {cleanup_error}")
-        raise
-    _progress(f"Cell {cell_id} is deployed in its own cluster and ready for tenants.")
-    return cell
-
-
-def _decommission(args: argparse.Namespace, api: Api, clusters: ClusterToolkit) -> Any:
-    cell_id = args.cell_id
-    api.call("DELETE", f"/v1/cells/{cell_id}")
-    _progress(f"{cell_id} deregistered from the control plane.")
-    if cell_id not in clusters.clusters():
-        _progress(f"note: no local cluster {cluster_name(cell_id)}; nothing else to remove.")
-        return {"cell_id": cell_id, "decommissioned": True, "cluster": "none"}
-
-    if args.delete_data:
-        clusters.delete(cell_id)
-        outcome = "deleted"
-    else:
-        clusters.stop(cell_id)
-        outcome = "stopped"
-    # A stopped cluster is still listed, so leave this cell out of the DNS zone explicitly.
-    remaining = [cell for cell in clusters.cell_ids() if cell != cell_id]
-    clusters.set_cell_dns({cell: clusters.node_ip(cell) for cell in remaining})
-    _progress(
-        f"Cluster {cluster_name(cell_id)} "
-        + ("deleted with its data." if outcome == "deleted" else "stopped; its data is kept.")
+    body = {k: v for k, v in _cell_body(args, "").items() if k != "url"}
+    return deploy_cell(
+        api,
+        clusters,
+        Path(args.charts_dir),
+        body,
+        image=args.image,
+        progress=_progress,
+        sleep=sleep,
     )
-    return {"cell_id": cell_id, "decommissioned": True, "cluster": outcome}
 
 
 # --- output -----------------------------------------------------------------------------
@@ -582,7 +523,54 @@ def main(
         if action == ("cells", "deploy"):
             data = _deploy(args, api, clusters or LocalClusters(), sleep)
         elif action == ("cells", "decommission"):
-            data = _decommission(args, api, clusters or LocalClusters())
+            data = decommission_cell(
+                api,
+                clusters or LocalClusters(),
+                args.cell_id,
+                delete_data=args.delete_data,
+                progress=_progress,
+            )
+        elif action == ("cells", "drain"):
+            data = drain(
+                api,
+                clusters or LocalClusters(),
+                Path(args.charts_dir),
+                args.cell_id,
+                progress=_progress,
+                sleep=sleep,
+            )
+        elif action == ("cells", "consolidate"):
+            data = consolidate(
+                api,
+                clusters or LocalClusters(),
+                Path(args.charts_dir),
+                args.cell_id,
+                delete_data=args.delete_data,
+                progress=_progress,
+                sleep=sleep,
+            )
+        elif action == ("tenants", "promote"):
+            data = promote(
+                api,
+                clusters or LocalClusters(),
+                Path(args.charts_dir),
+                args.tenant_id,
+                cell_id=args.cell,
+                size=args.size,
+                image=args.image,
+                progress=_progress,
+                sleep=sleep,
+            )
+        elif action == ("tenants", "demote"):
+            data = demote(
+                api,
+                clusters or LocalClusters(),
+                Path(args.charts_dir),
+                args.tenant_id,
+                delete_data=args.delete_data,
+                progress=_progress,
+                sleep=sleep,
+            )
         elif action == ("tenants", "create"):
             body = {"tenant_id": args.tenant_id, "name": args.name or args.tenant_id}
             body["tier"] = args.tier
