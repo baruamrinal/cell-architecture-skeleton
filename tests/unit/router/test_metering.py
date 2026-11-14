@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from cellarch.data_plane.router.app import RouterSettings, create_app
 from cellarch.data_plane.router.metering import Metering
+from tests.fakes import async_client
 
 
 def test_counts_requests_throttles_and_status_classes() -> None:
@@ -45,7 +45,7 @@ def test_other_status_codes_are_counted_but_not_classified() -> None:
 def test_stats_endpoint_is_off_without_a_metrics_token() -> None:
     app = create_app(
         RouterSettings(control_plane_url="http://cp", router_token="r"),
-        http_client=httpx.AsyncClient(),
+        http_client=async_client(),
     )
     response = TestClient(app).get("/_router/stats")
     assert (response.status_code, response.json()["error"]) == (404, "not_found")

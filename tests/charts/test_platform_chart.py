@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -141,6 +142,22 @@ def test_with_the_web_ui_the_edge_sends_pages_to_it_and_api_paths_to_the_router(
     for api in ("/graphql", "/v1/", "/_router/"):
         assert "-router:8000" in blocks[api], api
     assert "http://dev-idp:8000" in blocks["/auth/"]
+    # Cells' /internal API never leaves the platform: the edge refuses it outright
+    # instead of letting the web UI answer with its page.
+    assert re.search(r"location /internal \{[^}]*return 404", config)
+
+
+def test_new_edge_routes_roll_the_edge_pods() -> None:
+    """nginx reads its config at start: a change to the routes must restart it."""
+
+    def checksum(values: dict[str, Any]) -> str:
+        edge = find(render("platform", values), "Deployment", "edge")
+        result: str = edge["spec"]["template"]["metadata"]["annotations"]["checksum/config"]
+        return result
+
+    with_ui = {**REQUIRED, "edge": {"webUiUrl": "http://web-ui:8080"}}
+    assert checksum(REQUIRED) != checksum(with_ui)
+    assert checksum(with_ui) == checksum(with_ui)
 
 
 def test_the_router_checks_web_ui_sessions() -> None:

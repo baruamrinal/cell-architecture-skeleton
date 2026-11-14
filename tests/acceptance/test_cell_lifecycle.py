@@ -197,6 +197,7 @@ def cellctl(platform: Platform, clusters: FakeClusters, charts: Path, *args: str
         client=platform.admin,
         token=ADMIN_TOKEN,
         clusters=clusters,
+        sleep=lambda seconds: None,  # tests never sleep
     )
 
 

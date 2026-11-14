@@ -21,6 +21,7 @@ from cellarch.services.common.settings import ServiceSettings
 from cellarch.services.order_processing.app import OrderSettings
 from cellarch.services.order_processing.app import create_app as create_order_processing
 from cellarch.services.user_account.app import create_app as create_user_account
+from tests.fakes import async_client
 
 from .conftest import ADMIN_TOKEN, CELL_TOKENS, ROUTE_CACHE_TTL, InProcessStacks, Platform
 
@@ -303,9 +304,7 @@ def _start_services(urls: dict[str, str]) -> tuple[TestClient, TestClient]:
     users = create_user_account(ServiceSettings("acme", "stack", urls["user-account"]))
     orders = create_order_processing(
         OrderSettings("acme", "stack", urls["order-processing"], user_account_url="http://ua"),
-        http_client=httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=users), base_url="http://ua"
-        ),
+        http_client=async_client(transport=httpx.ASGITransport(app=users), base_url="http://ua"),
     )
     return TestClient(users), TestClient(orders)
 

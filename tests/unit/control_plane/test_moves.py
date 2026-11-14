@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from cellarch.common.headers import INTERNAL_TOKEN_HEADER
 from cellarch.control_plane.app import ControlPlaneSettings, create_app
 from cellarch.control_plane.store import ControlPlaneStore
+from tests.fakes import async_client
 
 ADMIN = {INTERNAL_TOKEN_HEADER: "admin-t"}
 
@@ -76,7 +77,7 @@ def admin(tmp_path: Path, cells: ScriptedCells) -> Iterator[TestClient]:
             router_token="router-t",
             cell_credentials={f"cell-{i}": f"cell-{i}-credential" for i in (1, 2, 3)},
         ),
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(cells.handler)),
+        http_client=async_client(transport=httpx.MockTransport(cells.handler)),
     )
     with TestClient(app, headers=ADMIN) as client:
         for cell_id in ("cell-1", "cell-2"):

@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from cellarch.common.headers import INTERNAL_TOKEN_HEADER, TENANT_HEADER
 from cellarch.mgr.app import CSRF_HEADER, MgrSettings, create_app
+from tests.fakes import async_client
 
 TOKEN = "gateway-to-mgr"
 FROM_GATEWAY = {INTERNAL_TOKEN_HEADER: TOKEN, TENANT_HEADER: "acme"}
@@ -71,7 +72,7 @@ def gateway() -> Gateway:
 def client(gateway: Gateway, **settings: Any) -> TestClient:
     app = create_app(
         MgrSettings(cell_id="cell-1", gateway_url="http://gw", gateway_token=TOKEN, **settings),
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(gateway.handler)),
+        http_client=async_client(transport=httpx.MockTransport(gateway.handler)),
     )
     return TestClient(app)
 

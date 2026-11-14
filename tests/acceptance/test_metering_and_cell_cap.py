@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from cellarch.common.headers import CELL_HEADER, INTERNAL_TOKEN_HEADER, TENANT_HEADER
 from cellarch.data_plane.cell.app import CellSettings, create_app
-from tests.fakes import MemorySecrets, StackHost, stack_url_template
+from tests.fakes import MemorySecrets, StackHost, async_client, stack_url_template
 
 from .conftest import ADMIN_TOKEN, METRICS_TOKEN, Platform
 
@@ -83,7 +83,7 @@ def test_a39_an_overloaded_cell_rejects_new_requests_immediately(
 
     async def scenario() -> tuple[httpx.Response, httpx.Response, httpx.Response]:
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://cell-x") as client:
+        async with async_client(transport=transport, base_url="http://cell-x") as client:
             busy = asyncio.create_task(client.get("/v1/users", headers={TENANT_HEADER: "acme"}))
             await asyncio.to_thread(started.wait, 5)
             rejected = await client.get("/v1/users", headers={TENANT_HEADER: "acme"})

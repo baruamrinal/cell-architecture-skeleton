@@ -19,7 +19,7 @@ from cellarch.data_plane.cell.tenant_resources import (
     TenantResourceError,
     database_url_key,
 )
-from tests.fakes import MemorySecrets, StackHost, stack_url_template
+from tests.fakes import MemorySecrets, StackHost, async_client, stack_url_template
 
 TOKEN = "cell-token"
 INTERNAL = {INTERNAL_TOKEN_HEADER: TOKEN}
@@ -247,7 +247,7 @@ class TestInternalApi:
                 tenant_db_admin_url=f"sqlite:///{tmp_path.as_posix()}/tenants",
             ),
             secrets=MemorySecrets(),
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(stack), timeout=10),
+            http_client=async_client(transport=httpx.MockTransport(stack), timeout=10),
         )
         client = TestClient(app)
         client.post("/internal/tenants", json={"tenant_id": "acme"}, headers=INTERNAL)

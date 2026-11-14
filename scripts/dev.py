@@ -459,8 +459,8 @@ def main(
         if target == "test":
             return run([str(venv_python(root)), "-m", "pytest", "--cov"], env)
         if target == "test-fast":
-            fast = [str(venv_python(root)), "-m", "pytest", "-m", FAST_TESTS, "-p", "no:cacheprovider"]
-            return run(fast, env)
+            pytest = [str(venv_python(root)), "-m", "pytest"]
+            return run([*pytest, "-m", FAST_TESTS, "-p", "no:cacheprovider"], env)
         if target == "up":
             return up(root, run, k3d, env, port_in_use, answers, sleep, tag, ui_tag)
         if target == "deploy-mgr":
