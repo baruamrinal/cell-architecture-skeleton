@@ -24,7 +24,13 @@ import httpx
 import psycopg
 from psycopg import sql
 
-from cellarch.common.sql import SQLITE_PREFIX, sqlite_url
+from cellarch.common.sql import (
+    SQLITE_PREFIX,
+    Database,
+    PostgresDatabase,
+    SqliteDatabase,
+    sqlite_url,
+)
 
 SERVICES = ("user-account", "order-processing")
 STACK_TOKEN_KEY = "stack-token"  # noqa: S105 - a key name, not a secret
@@ -77,6 +83,13 @@ class TenantDatabases(Protocol):
     def drop(self, tenant_id: str) -> None:
         """Delete the tenant's database and logins. Idempotent."""
 
+    def service_database(self, tenant_id: str, service: str) -> Database:
+        """The tenant's database as the cell admin sees one service's part of it.
+
+        Used to copy a tenant's data; on Postgres it works with that service's login's
+        rights, in that service's schema.
+        """
+
 
 class SqliteTenantDatabases:
     """In-process stand-in: one SQLite file per tenant, shared by its services."""
@@ -90,6 +103,9 @@ class SqliteTenantDatabases:
     def create(self, tenant_id: str) -> dict[str, str]:
         self._directory.mkdir(parents=True, exist_ok=True)
         return dict.fromkeys(SERVICES, sqlite_url(self._path(tenant_id)))
+
+    def service_database(self, tenant_id: str, service: str) -> Database:
+        return SqliteDatabase(str(self._path(tenant_id)))  # services share the file
 
     def drop(self, tenant_id: str) -> None:
         database = self._path(tenant_id)
@@ -176,6 +192,12 @@ class PostgresTenantDatabases:
         except psycopg.Error as exc:
             raise TenantResourceError(f"the database server refused: {type(exc).__name__}") from exc
         return urls
+
+    def service_database(self, tenant_id: str, service: str) -> Database:
+        url = urlunsplit(urlsplit(self._admin_url)._replace(path=f"/{database_name(tenant_id)}"))
+        return PostgresDatabase(
+            url, role=login_name(tenant_id, service), schema=schema_name(service)
+        )
 
     def drop(self, tenant_id: str) -> None:
         try:

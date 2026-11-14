@@ -5,22 +5,27 @@
 * Tenants the cell doesn't host get ``421`` (the router's route is stale).
 * ``/internal/*`` (control plane only, this cell's credential) runs the cell's part of
   onboarding: create the tenant's database, logins and stack secret, activate the
-  tenant once its stack is ready, and delete everything again.
+  tenant once its stack is ready, and delete everything again; and of tenant moves
+  (docs/plan.md §5): freeze the tenant (reads only), export its data, import it on the
+  target, unfreeze it after a rollback.
 """
 
 import asyncio
 import contextlib
+import itertools
 import os
 import string
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from secrets import token_urlsafe
-from typing import Annotated
+from typing import Annotated, Any
 
 import httpx
 from fastapi import APIRouter, Depends, FastAPI, Header, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from cellarch.common.config import require_env
 from cellarch.common.contracts import TENANT_ID_PATTERN, is_valid_tenant_id
@@ -28,8 +33,10 @@ from cellarch.common.errors import ApiError, install_error_handlers
 from cellarch.common.headers import CELL_HEADER, INTERNAL_TOKEN_HEADER, TENANT_HEADER
 from cellarch.common.logging import configure_logging
 from cellarch.common.security import TokenAuth
+from cellarch.common.sql import DatabaseError
 from cellarch.data_plane.cell.concurrency import ConcurrencyLimit
 from cellarch.data_plane.cell.store import CellStore
+from cellarch.data_plane.cell.tenant_data import TenantDataError, export_tenant, import_tenant
 from cellarch.data_plane.cell.tenant_resources import (
     SERVICES,
     STACK_TOKEN_KEY,
@@ -47,6 +54,8 @@ RESOURCES = {"users": "user-account", "orders": "order-processing"}
 FORWARDED_REQUEST_HEADERS = ("content-type", "accept", "idempotency-key", "x-request-id")
 FORWARDED_RESPONSE_HEADERS = ("content-type", "idempotent-replay", "retry-after")
 RETRY_AFTER = {"Retry-After": "1"}
+READ_METHODS = frozenset({"GET", "HEAD"})
+FROZEN = "frozen"  # being moved: reads only
 
 
 def _check_service_url(template: str) -> None:
@@ -160,7 +169,12 @@ def create_app(
 
     async def forward(request: Request, tenant: str, resource: str, rest: str) -> Response:
         entry = store.get_tenant(tenant)
-        if entry is None or entry["status"] != "active":
+        status = entry["status"] if entry else None
+        if status == FROZEN and request.method not in READ_METHODS:
+            raise ApiError(
+                503, "tenant_migrating", "the tenant is being moved; retry shortly", RETRY_AFTER
+            )
+        if status not in ("active", FROZEN):
             raise ApiError(503, "tenant_not_ready", "the tenant is being set up", RETRY_AFTER)
         headers = {k: v for k, v in request.headers.items() if k in FORWARDED_REQUEST_HEADERS}
         # The gateway, not the client, presents the tenant's stack credential.
@@ -245,6 +259,58 @@ def create_app(
         store.set_status(tenant_id, "active")
         tenant = store.get_tenant(tenant_id)
         return CellTenant(**tenant)  # type: ignore[arg-type]
+
+    def hosted(tenant_id: str) -> dict[str, Any]:
+        tenant = store.get_tenant(tenant_id)
+        if tenant is None:
+            raise ApiError(404, "tenant_not_found", f"tenant {tenant_id} is not on this cell")
+        return tenant
+
+    @internal.post("/tenants/{tenant_id}/freeze")
+    def freeze_tenant(tenant_id: str) -> CellTenant:
+        """Stop taking writes for the tenant (a move is starting). Idempotent."""
+        tenant = hosted(tenant_id)
+        if tenant["status"] not in ("active", FROZEN):
+            raise ApiError(409, "tenant_not_active", "only an active tenant can be frozen")
+        store.set_status(tenant_id, FROZEN)
+        return CellTenant(**hosted(tenant_id))
+
+    @internal.post("/tenants/{tenant_id}/unfreeze")
+    def unfreeze_tenant(tenant_id: str) -> CellTenant:
+        """Take writes again (the move was rolled back). Idempotent."""
+        if hosted(tenant_id)["status"] == FROZEN:
+            store.set_status(tenant_id, "active")
+        return CellTenant(**hosted(tenant_id))
+
+    @internal.get("/tenants/{tenant_id}/export")
+    def export(tenant_id: str) -> StreamingResponse:
+        """The frozen tenant's data as JSON lines (tenant_data.py)."""
+        if hosted(tenant_id)["status"] != FROZEN:
+            raise ApiError(409, "tenant_not_frozen", "freeze the tenant before exporting it")
+        try:
+            lines = export_tenant(databases, tenant_id)
+            first = next(lines)  # fail before the response starts if the database can't
+        except DatabaseError as exc:
+            raise ApiError(502, "tenant_export_failed", "the tenant's database failed") from exc
+        except TenantDataError as exc:
+            raise ApiError(exc.status, exc.code, exc.message) from exc
+        return StreamingResponse(itertools.chain([first], lines), media_type="application/x-ndjson")
+
+    @internal.post("/tenants/{tenant_id}/import")
+    async def import_(tenant_id: str, request: Request) -> dict[str, dict[str, int]]:
+        """Load another cell's export into this tenant's new, empty database."""
+        if hosted(tenant_id)["status"] != "provisioning":
+            raise ApiError(
+                409, "tenant_not_importable", "only a tenant being set up here can be imported"
+            )
+        body = await request.body()
+        try:
+            counts = await run_in_threadpool(import_tenant, databases, tenant_id, body.splitlines())
+        except TenantDataError as exc:
+            raise ApiError(exc.status, exc.code, exc.message) from exc
+        except DatabaseError as exc:
+            raise ApiError(502, "tenant_import_failed", "the tenant's database failed") from exc
+        return {"tables": counts}
 
     @internal.delete("/tenants/{tenant_id}", status_code=204)
     def delete_tenant(tenant_id: str) -> Response:

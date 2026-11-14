@@ -69,7 +69,7 @@ Targets are design goals, to be validated with restore drills (runbook in stage 
 - **Data:** encryption at rest (KMS) and in transit (TLS), deletion protection, per-tenant databases. That allows **customer-managed keys per tenant** and **data residency** by choosing the cell's region.
 - **Supply chain:** pinned and scanned images, Dependabot, secret scanning, branch protection with a policy gate (built), signed images (planned).
 - **Detection:** CloudTrail, GuardDuty, a focused set of AWS Config rules, IAM Access Analyzer.
-- **Audit:** `created_by` / `updated_by` on every record (built), a full audit log (stage 3), CloudTrail for infrastructure.
+- **Audit:** `created_by` / `updated_by` on every record (built), a full audit log (built: `GET /v1/audit`; on AWS also shipped to CloudWatch Logs), CloudTrail for infrastructure.
 - **Compliance programmes** (SOC 2, ISO 27001): the guardrails provide the controls and evidence; certification itself is an organizational process.
 
 ## 6. Observability

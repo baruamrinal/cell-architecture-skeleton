@@ -102,6 +102,72 @@ class TestContract:
             assert conn.execute("SELECT n FROM counter").fetchone() == {"n": 20}
 
 
+class TestCopyingData:
+    """What a tenant move needs: list tables, insert rows with their keys, continue keys."""
+
+    def test_lists_its_tables(self, database_url: str) -> None:
+        db = open_database(database_url)
+        with db.connect() as conn:
+            conn.execute(db.ddl(TABLE))
+            conn.execute("CREATE TABLE notes (key TEXT PRIMARY KEY)")
+            assert db.tables(conn) == ["notes", "things"]  # no internal tables
+
+    def test_rows_keep_their_keys_and_new_keys_continue_after_them(self, database_url: str) -> None:
+        db = open_database(database_url)
+        insert = db.insert_keeping_keys("things", ["seq", "id", "name"])
+        with db.connect() as conn:
+            conn.execute(db.ddl(TABLE))
+            conn.execute(insert, (7, "a", "a"))
+            conn.execute(insert, (3, "b", "b"))
+            db.continue_sequence(conn, "things")
+            conn.execute("INSERT INTO things (id, name) VALUES (?, ?)", ("c", "c"))
+            rows = conn.execute("SELECT id, seq FROM things ORDER BY seq").fetchall()
+        assert [(r["id"], r["seq"]) for r in rows[:2]] == [("b", 3), ("a", 7)]
+        assert rows[2]["id"] == "c" and rows[2]["seq"] > 7
+
+    def test_continuing_an_empty_sequence_is_harmless(self, database_url: str) -> None:
+        db = open_database(database_url)
+        with db.connect() as conn:
+            conn.execute(db.ddl(TABLE))
+            db.continue_sequence(conn, "things")
+            conn.execute("INSERT INTO things (id, name) VALUES (?, ?)", ("a", "a"))
+            assert conn.execute("SELECT seq FROM things").fetchone() == {"seq": 1}
+
+    @pytest.mark.parametrize("name", ["things; DROP TABLE x", "Things", "1st", ""])
+    def test_refuses_names_that_are_not_plain_identifiers(
+        self, database_url: str, name: str
+    ) -> None:
+        db = open_database(database_url)
+        with pytest.raises(ValueError, match="identifier"):
+            db.insert_keeping_keys(name, ["id"])
+        with pytest.raises(ValueError, match="identifier"):
+            db.insert_keeping_keys("things", ["id", name])
+
+
+def test_postgres_can_act_as_a_service_login(postgres_url: str) -> None:
+    """The cell's admin login works inside one schema with one service login's rights."""
+    with psycopg.connect(postgres_url, autocommit=True) as conn:
+        conn.execute("DROP ROLE IF EXISTS copier_test")
+        conn.execute("CREATE ROLE copier_test")
+        conn.execute("CREATE SCHEMA copier AUTHORIZATION copier_test")
+    try:
+        db = PostgresDatabase(postgres_url, role="copier_test", schema="copier")
+        with db.connect() as conn:
+            conn.execute("CREATE TABLE notes (key TEXT)")
+            who = conn.execute("SELECT current_user AS u, current_schema() AS s").fetchone()
+            assert db.tables(conn) == ["notes"]
+        assert who == {"u": "copier_test", "s": "copier"}
+        with psycopg.connect(postgres_url) as conn:
+            owner = conn.execute(
+                "SELECT tableowner FROM pg_tables WHERE tablename = 'notes'"
+            ).fetchone()
+        assert owner == ("copier_test",)
+    finally:
+        with psycopg.connect(postgres_url, autocommit=True) as conn:
+            conn.execute("DROP SCHEMA IF EXISTS copier CASCADE")
+            conn.execute("DROP ROLE IF EXISTS copier_test")
+
+
 class TestOpenDatabase:
     def test_sqlite_urls(self, tmp_path: Path) -> None:
         db = open_database(sqlite_url(tmp_path / "sub" / "t.db"))
@@ -222,3 +288,22 @@ def test_sqlite_connection_failures_raise_database_error(tmp_path: Path) -> None
     db: Database = SqliteDatabase(str(tmp_path / "a-folder.db"))
     with pytest.raises(DatabaseError):
         db.ping()
+
+
+class TestActingAsAServiceLogin:
+    def test_sets_the_role_and_optionally_the_schema(self) -> None:
+        conn = FakePgConnection()
+        db = PostgresDatabase("postgresql://u:pw@h/db", connect=lambda url: conn, role="r1")
+        with db.connect():
+            pass
+        assert len(conn.statements) == 1  # role only: no schema given
+        assert conn.committed
+
+    def test_a_role_it_may_not_use_raises_database_error(self) -> None:
+        conn = FakePgConnection(fail_with=psycopg.errors.InsufficientPrivilege("denied"))
+        db = PostgresDatabase(
+            "postgresql://u:pw@h/db", connect=lambda url: conn, role="r1", schema="s1"
+        )
+        with pytest.raises(DatabaseError, match="InsufficientPrivilege"), db.connect():
+            pass
+        assert conn.rolled_back

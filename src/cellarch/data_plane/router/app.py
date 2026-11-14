@@ -32,6 +32,7 @@ from cellarch.data_plane.router.routing import (
     TenantResolver,
 )
 
+_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 HOP_BY_HOP = frozenset(
     {
         "connection",
@@ -184,7 +185,13 @@ def create_app(
         request: Request, raw_path: str, tenant_id: str, entry: RoutingEntry
     ) -> tuple[Response, bool]:
         """Limit and forward a request for a known tenant; returns (response, throttled)."""
-        if entry.status != "active":
+        if entry.status == "migrating" and request.method not in _READ_METHODS:
+            # Being moved to another cell: reads go on, writes wait (docs/plan.md §5).
+            migrating = error_response(
+                503, "tenant_migrating", "the tenant is being moved; retry shortly", RETRY_AFTER
+            )
+            return migrating, False
+        if entry.status not in ("active", "migrating"):
             return (
                 error_response(503, "tenant_unavailable", "tenant unavailable", RETRY_AFTER),
                 False,

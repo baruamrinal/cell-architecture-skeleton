@@ -8,7 +8,7 @@ onboarding steps `cellctl tenants create` runs.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +19,8 @@ from fastapi.testclient import TestClient
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from cellarch.cli.api import Api
+from cellarch.cli.clusters import ClusterError
+from cellarch.cli.moves import move
 from cellarch.cli.onboarding import offboard, onboard
 from cellarch.common.headers import INTERNAL_TOKEN_HEADER, TENANT_HEADER
 from cellarch.control_plane.app import ControlPlaneSettings
@@ -62,10 +64,22 @@ def make_cell(
 
 
 class InProcessStacks:
-    """The cell clusters' Helm, as onboarding uses it: tenant stacks start in-process."""
+    """The cell clusters' Helm, as onboarding uses it: tenant stacks start in-process.
 
-    def __init__(self, platform: Platform) -> None:
+    ``fail_install_on`` makes installs on that cell fail; ``after_install`` runs once a
+    stack is up, to look at (or disturb) a move half-way through.
+    """
+
+    def __init__(
+        self,
+        platform: Platform,
+        *,
+        fail_install_on: str | None = None,
+        after_install: Callable[[str, str], None] | None = None,
+    ) -> None:
         self.platform = platform
+        self.fail_install_on = fail_install_on
+        self.after_install = after_install
 
     def cell_ids(self) -> list[str]:
         return sorted(c for c, switch in self.platform.cells.items() if switch.reachable)
@@ -74,8 +88,12 @@ class InProcessStacks:
         self, short: str, release: str, chart: Path, values: dict[str, Any], **kw: Any
     ) -> None:
         tenant_id = values["tenantId"]
+        if short == self.fail_install_on:
+            raise ClusterError(f"helm install {release} failed on {short}")
         secret = self.platform.cell_secrets[short].values[tenant_id]
         self.platform.stacks.start(short, tenant_id, secret)
+        if self.after_install is not None:
+            self.after_install(short, tenant_id)
 
     def helm_uninstall(self, short: str, release: str) -> None:
         self.platform.stacks.stop(short, release.removeprefix("tenant-"))
@@ -195,6 +213,20 @@ class Platform:
         )
         cell_id: str = tenant["cell_id"]
         return cell_id
+
+    def move(
+        self, tenant_id: str, to: str | None = None, stacks: InProcessStacks | None = None
+    ) -> Any:
+        """Move a tenant as `cellctl tenants move` does; returns the finished move."""
+        return move(
+            self.api(),
+            stacks or InProcessStacks(self),
+            CHARTS,
+            tenant_id,
+            to,
+            progress=_quiet,
+            sleep=_quiet,
+        )
 
     def offboard(self, tenant_id: str) -> None:
         offboard(self.api(), InProcessStacks(self), tenant_id, progress=_quiet)

@@ -80,20 +80,7 @@ class Cell:
 
 @pytest.fixture
 def cell(tmp_path: Path) -> Cell:
-    secrets, stacks = MemorySecrets(), StackHost()
-    databases = SqliteTenantDatabases(str(tmp_path / "tenants"))
-    app = create_app(
-        CellSettings(
-            cell_id="cell-x",
-            db_path=str(tmp_path / "c.db"),
-            internal_token=TOKEN,
-            tenant_db_admin_url=f"sqlite:///{tmp_path.as_posix()}/tenants",
-            tenant_service_url=stack_url_template("cell-x"),
-        ),
-        secrets=secrets,
-        http_client=stacks.client(),
-    )
-    return Cell(TestClient(app), secrets, stacks, databases)
+    return make_cell(tmp_path)
 
 
 class TestRequests:
@@ -244,6 +231,131 @@ class TestInternalApi:
         ] == ["acme"]
 
 
+class TestMoves:
+    """The cell's part of a tenant move: freeze, export, import, unfreeze."""
+
+    def freeze(self, cell: Cell, action: str = "freeze") -> int:
+        response = cell.client.post(f"/internal/tenants/acme/{action}", headers=INTERNAL)
+        status: int = response.status_code
+        return status
+
+    def sign_up(self, cell: Cell, email: str = "ana@example.test") -> int:
+        response = cell.client.post(
+            "/v1/users", json={"email": email, "name": "Ana"}, headers={TENANT_HEADER: "acme"}
+        )
+        status: int = response.status_code
+        return status
+
+    def test_a_frozen_tenant_serves_reads_and_pauses_writes(self, cell: Cell) -> None:
+        cell.onboard()
+        assert self.sign_up(cell) == 201
+        assert self.freeze(cell) == 200
+        assert self.freeze(cell) == 200  # idempotent
+
+        read = cell.client.get("/v1/users", headers={TENANT_HEADER: "acme"})
+        write = cell.client.post(
+            "/v1/users",
+            json={"email": "b@example.test", "name": "B"},
+            headers={TENANT_HEADER: "acme"},
+        )
+
+        assert read.status_code == 200
+        assert (write.status_code, write.json()["error"]) == (503, "tenant_migrating")
+        assert write.headers["Retry-After"]
+        assert self.freeze(cell, "unfreeze") == 200
+        assert self.sign_up(cell, "c@example.test") == 201
+
+    def test_only_active_tenants_can_be_frozen(self, cell: Cell) -> None:
+        cell.provision()
+        response = cell.client.post("/internal/tenants/acme/freeze", headers=INTERNAL)
+        assert (response.status_code, response.json()["error"]) == (409, "tenant_not_active")
+        missing = cell.client.post("/internal/tenants/nobody/freeze", headers=INTERNAL)
+        assert missing.status_code == 404
+        assert (
+            cell.client.post("/internal/tenants/nobody/unfreeze", headers=INTERNAL).status_code
+            == 404
+        )
+
+    def test_export_needs_a_frozen_tenant(self, cell: Cell) -> None:
+        cell.onboard()
+        response = cell.client.get("/internal/tenants/acme/export", headers=INTERNAL)
+        assert (response.status_code, response.json()["error"]) == (409, "tenant_not_frozen")
+        missing = cell.client.get("/internal/tenants/nobody/export", headers=INTERNAL)
+        assert missing.status_code == 404
+
+    def test_export_then_import_into_another_cell(self, cell: Cell, tmp_path: Path) -> None:
+        cell.onboard()
+        assert self.sign_up(cell) == 201
+        self.freeze(cell)
+        export = cell.client.get("/internal/tenants/acme/export", headers=INTERNAL)
+        assert export.status_code == 200
+        assert export.headers["content-type"].startswith("application/x-ndjson")
+
+        other = make_cell(tmp_path / "other")
+        other.provision()
+        other.start_stack()
+        imported = other.client.post(
+            "/internal/tenants/acme/import", content=export.content, headers=INTERNAL
+        )
+
+        assert imported.status_code == 200, imported.text
+        assert imported.json()["tables"]["user_account_users"] == 1
+        assert other.activate() == 200
+        listed = other.client.get("/v1/users", headers={TENANT_HEADER: "acme"}).json()["items"]
+        assert [u["email"] for u in listed] == ["ana@example.test"]
+
+    def test_import_only_into_a_tenant_being_set_up(self, cell: Cell) -> None:
+        cell.onboard()
+        active = cell.client.post("/internal/tenants/acme/import", content=b"", headers=INTERNAL)
+        assert (active.status_code, active.json()["error"]) == (409, "tenant_not_importable")
+        missing = cell.client.post("/internal/tenants/nobody/import", content=b"", headers=INTERNAL)
+        assert missing.status_code == 404
+
+    def test_import_errors_keep_their_code(self, cell: Cell) -> None:
+        cell.provision()  # its stack never started: no tables yet
+        response = cell.client.post(
+            "/internal/tenants/acme/import", content=b"{not json", headers=INTERNAL
+        )
+        assert (response.status_code, response.json()["error"]) == (422, "invalid_export")
+
+    def test_database_failures_during_export_are_reported(
+        self, cell: Cell, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cell.onboard()
+        self.freeze(cell)
+        from cellarch.common.sql import DatabaseError
+        from cellarch.data_plane.cell import app as gateway
+
+        def broken(*args: object, **kwargs: object) -> object:
+            raise DatabaseError("server gone")
+
+        monkeypatch.setattr(gateway, "export_tenant", broken)
+        response = cell.client.get("/internal/tenants/acme/export", headers=INTERNAL)
+        assert (response.status_code, response.json()["error"]) == (502, "tenant_export_failed")
+        monkeypatch.setattr(gateway, "import_tenant", broken)
+        cell.provision("globex")
+        response = cell.client.post(
+            "/internal/tenants/globex/import", content=b"x", headers=INTERNAL
+        )
+        assert (response.status_code, response.json()["error"]) == (502, "tenant_import_failed")
+
+
+def make_cell(tmp_path: Path) -> Cell:
+    secrets, stacks = MemorySecrets(), StackHost()
+    app = create_app(
+        CellSettings(
+            cell_id="cell-x",
+            db_path=str(tmp_path / "c.db"),
+            internal_token=TOKEN,
+            tenant_db_admin_url=f"sqlite:///{tmp_path.as_posix()}/tenants",
+            tenant_service_url=stack_url_template("cell-x"),
+        ),
+        secrets=secrets,
+        http_client=stacks.client(),
+    )
+    return Cell(TestClient(app), secrets, stacks, SqliteTenantDatabases(str(tmp_path / "tenants")))
+
+
 class TestSettings:
     def test_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CELL_ID", "cell-7")
@@ -313,3 +425,26 @@ def test_registries_from_before_tenant_stacks_are_upgraded(tmp_path: Path) -> No
         "provisioned_at": "then",
     }
     assert store.stack_token("acme") is None
+
+
+def test_unfreezing_an_active_tenant_changes_nothing(cell: Cell) -> None:
+    cell.onboard()
+    response = cell.client.post("/internal/tenants/acme/unfreeze", headers=INTERNAL)
+    assert (response.status_code, response.json()["status"]) == (200, "active")
+
+
+def test_an_export_refused_by_the_data_layer_keeps_its_code(
+    cell: Cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cellarch.data_plane.cell import app as gateway
+    from cellarch.data_plane.cell.tenant_data import TenantDataError
+
+    cell.onboard()
+    cell.client.post("/internal/tenants/acme/freeze", headers=INTERNAL)
+
+    def refused(*args: object, **kwargs: object) -> object:
+        raise TenantDataError("invalid_export", "a row cannot be exported", 422)
+
+    monkeypatch.setattr(gateway, "export_tenant", refused)
+    response = cell.client.get("/internal/tenants/acme/export", headers=INTERNAL)
+    assert (response.status_code, response.json()["error"]) == (422, "invalid_export")
