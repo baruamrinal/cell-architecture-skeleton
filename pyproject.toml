@@ -16,13 +16,19 @@ dependencies = [
     "pydantic>=2.8",
     "redis>=5",  # shared rate limiter (RATE_LIMIT_BACKEND=redis)
     "psycopg[binary]>=3.2",  # PostgreSQL: the cell database server (Aurora on AWS)
+    "PyJWT[crypto]>=2.9",  # web UI sessions: RS256 tokens (router, dev identity provider)
 ]
 
 [project.scripts]
 cellctl = "cellarch.cli.cellctl:run"
 
 [project.optional-dependencies]
+# mgr's own dependencies: only its image installs them (independent delivery).
+mgr = [
+    "strawberry-graphql>=0.240",
+]
 dev = [
+    "strawberry-graphql>=0.240",  # same as the mgr extra: CI installs .[dev]
     "pytest>=8",
     "pytest-cov>=5",
     "ruff>=0.6",

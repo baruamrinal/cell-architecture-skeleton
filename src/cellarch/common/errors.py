@@ -1,4 +1,9 @@
-"""One error shape for every API: ``{"error": <code>, "message": <text>}``."""
+"""One error shape for every API: ``{"error": <code>, "message": <text>}``.
+
+On ``/graphql`` (the web UI, docs/plan.md §2.4) the same error is a GraphQL error:
+``{"errors": [{"message", "extensions": {"code", "status", "retryAfter"}}]}``, with the
+HTTP status and ``Retry-After`` header kept, so the UI handles one shape.
+"""
 
 from collections.abc import Mapping
 
@@ -9,6 +14,7 @@ from fastapi.responses import JSONResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 _HTTP_CODES = {404: "not_found", 405: "method_not_allowed"}
+GRAPHQL_PATH = "/graphql"
 
 
 class ApiError(Exception):
@@ -34,9 +40,33 @@ def error_response(
     )
 
 
+def graphql_error_response(
+    status: int, code: str, message: str, headers: Mapping[str, str] | None = None
+) -> JSONResponse:
+    """The same error, shaped as a GraphQL response (``Retry-After`` also in extensions)."""
+    headers = dict(headers or {})
+    extensions: dict[str, object] = {"code": code, "status": status}
+    retry = next((v for k, v in headers.items() if k.lower() == "retry-after"), None)
+    if retry is not None and retry.isdigit():
+        extensions["retryAfter"] = int(retry)
+    return JSONResponse(
+        {"errors": [{"message": message, "extensions": extensions}], "data": None},
+        status_code=status,
+        headers=headers,
+    )
+
+
+def error_for(
+    path: str, status: int, code: str, message: str, headers: Mapping[str, str] | None = None
+) -> JSONResponse:
+    """The error in the shape the caller of ``path`` expects."""
+    shape = graphql_error_response if path == GRAPHQL_PATH else error_response
+    return shape(status, code, message, headers)
+
+
 async def _api_error(request: Request, exc: Exception) -> Response:
     assert isinstance(exc, ApiError)  # noqa: S101 - narrowing for the type checker
-    return error_response(exc.status, exc.code, exc.message, exc.headers)
+    return error_for(request.url.path, exc.status, exc.code, exc.message, exc.headers)
 
 
 async def _validation_error(request: Request, exc: Exception) -> Response:

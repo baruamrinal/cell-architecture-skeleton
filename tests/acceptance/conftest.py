@@ -3,7 +3,8 @@
 control plane, router and the cells run as ASGI apps connected through httpx ASGI
 transports: no Docker, no network, no sleeping (the router gets a fake clock). Each
 cell's tenant stacks run in-process too (tests/fakes.py), started by the same
-onboarding steps `cellctl tenants create` runs.
+onboarding steps `cellctl tenants create` runs. Every cell also has its mgr (the web
+UI's GraphQL backend), and the dev identity provider issues UI sessions.
 """
 
 from __future__ import annotations
@@ -30,6 +31,10 @@ from cellarch.data_plane.cell.app import CellSettings
 from cellarch.data_plane.cell.app import create_app as create_cell
 from cellarch.data_plane.router.app import RouterSettings
 from cellarch.data_plane.router.app import create_app as create_router
+from cellarch.dev_idp.app import DevIdpSettings
+from cellarch.dev_idp.app import create_app as create_dev_idp
+from cellarch.mgr.app import MgrSettings
+from cellarch.mgr.app import create_app as create_mgr
 from tests.fakes import MemorySecrets, StackHost, stack_url_template
 
 ADMIN_TOKEN = "test-admin-token"
@@ -44,6 +49,16 @@ CONTROL_PLANE_URL = "http://control-plane"
 ROUTE_CACHE_TTL = 5.0
 METRICS_TOKEN = "test-metrics-token"
 CHARTS = Path(__file__).resolve().parents[2] / "charts"
+IDP_URL = "http://dev-idp"
+SESSION_AUDIENCE = "cellarch-web"
+
+
+def mgr_token(cell_id: str) -> str:
+    return f"{cell_id}-mgr-token"
+
+
+def mgr_host(cell_id: str) -> str:
+    return f"mgr.{cell_id}.stacks"
 
 
 def make_cell(
@@ -58,9 +73,24 @@ def make_cell(
             internal_token=token,
             tenant_db_admin_url=f"sqlite:///{(folder / 'tenants').as_posix()}",
             tenant_service_url=stack_url_template(cell_id),
+            mgr_url=f"http://{mgr_host(cell_id)}",
+            mgr_token=mgr_token(cell_id),
         ),
         secrets=secrets,
         http_client=stacks.client(),
+    )
+
+
+def attach_mgr(stacks: StackHost, cell_id: str, gateway: ASGIApp) -> None:
+    """Start the cell's mgr next to its gateway (what `helm install mgr` does)."""
+    stacks.apps[mgr_host(cell_id)] = create_mgr(
+        MgrSettings(
+            cell_id=cell_id,
+            gateway_url=f"http://{cell_id}",
+            gateway_token=mgr_token(cell_id),
+            introspection=True,
+        ),
+        http_client=httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway)),
     )
 
 
@@ -205,6 +235,14 @@ class Platform:
     router_mounts: dict[str, httpx.AsyncBaseTransport]
     stacks: StackHost
     cell_secrets: dict[str, MemorySecrets]
+    idp: TestClient
+    idp_app: Any
+
+    def mgr_client(self, cell_id: str) -> TestClient:
+        """A client that reaches a cell's mgr directly, without its gateway."""
+        return TestClient(
+            self.stacks.apps[mgr_host(cell_id)], base_url=f"http://{mgr_host(cell_id)}"
+        )
 
     def extra_router(self, **settings: Any) -> TestClient:
         """Another router on the same platform, e.g. one of several replicas."""
@@ -233,6 +271,7 @@ class Platform:
         secrets = self.cell_secrets.setdefault(cell_id, MemorySecrets())
         self.cells[cell_id].app = make_cell(self.tmp_path, cell_id, token, self.stacks, secrets)
         self.cells[cell_id].reachable = True
+        attach_mgr(self.stacks, cell_id, self.cells[cell_id])
 
     def stop_cell(self, cell_id: str) -> None:
         self.cells[cell_id].app = _nothing_running
@@ -312,9 +351,14 @@ def platform(tmp_path: Path) -> Iterator[Platform]:
         cell_id: Switch(make_cell(tmp_path, cell_id, token, stacks, cell_secrets[cell_id]))
         for cell_id, token in tokens.items()
     }
+    for cell_id, switch in cells.items():
+        attach_mgr(stacks, cell_id, switch)
     for cell_id in SPARE_CELL_IDS:
         cells[cell_id] = Switch(_nothing_running)
         cells[cell_id].reachable = False
+    idp_app = create_dev_idp(
+        DevIdpSettings(issuer=IDP_URL, audience=SESSION_AUDIENCE, cookie_secure=False)
+    )
     # Each cell answers by its short name and by its DNS name in the cellarch.internal
     # zone, the address the k3d runtime uses between clusters.
     cell_mounts: dict[str, httpx.AsyncBaseTransport] = {
@@ -338,6 +382,7 @@ def platform(tmp_path: Path) -> Iterator[Platform]:
     router_mounts: dict[str, httpx.AsyncBaseTransport] = {
         **cell_mounts,
         CONTROL_PLANE_URL: httpx.ASGITransport(app=control_plane),
+        IDP_URL: httpx.ASGITransport(app=idp_app),
     }
     router_app = create_router(
         RouterSettings(
@@ -345,6 +390,9 @@ def platform(tmp_path: Path) -> Iterator[Platform]:
             router_token=ROUTER_TOKEN,
             cache_ttl_seconds=ROUTE_CACHE_TTL,
             metrics_token=METRICS_TOKEN,
+            session_jwks_url=f"{IDP_URL}/auth/.well-known/jwks.json",
+            session_issuer=IDP_URL,
+            session_audience=SESSION_AUDIENCE,
         ),
         http_client=httpx.AsyncClient(mounts=router_mounts),
         clock=clock,
@@ -355,6 +403,7 @@ def platform(tmp_path: Path) -> Iterator[Platform]:
             control_plane, base_url=CONTROL_PLANE_URL, headers={INTERNAL_TOKEN_HEADER: ADMIN_TOKEN}
         ) as admin,
         TestClient(router_app, base_url="http://router") as router,
+        TestClient(idp_app, base_url=IDP_URL) as idp,
     ):
         yield Platform(
             admin=admin,
@@ -371,4 +420,6 @@ def platform(tmp_path: Path) -> Iterator[Platform]:
             router_mounts=router_mounts,
             stacks=stacks,
             cell_secrets=cell_secrets,
+            idp=idp,
+            idp_app=idp_app,
         )

@@ -2,6 +2,8 @@
 
 * ``/v1/users…`` and ``/v1/orders…`` go to the calling tenant's own user-account and
   order-processing services, with the tenant's stack credential.
+* ``/graphql`` goes to the cell's ``mgr``, the web UI's GraphQL backend (docs/plan.md
+  §2.4), with the tenant and the gateway's ``mgr`` credential.
 * Tenants the cell doesn't host get ``421`` (the router's route is stale).
 * ``/internal/*`` (control plane only, this cell's credential) runs the cell's part of
   onboarding: create the tenant's database, logins and stack secret, activate the
@@ -53,6 +55,7 @@ DEFAULT_SERVICE_URL = "http://tenant-{tenant}-{service}:8000"  # tenant-stack ch
 RESOURCES = {"users": "user-account", "orders": "order-processing"}
 FORWARDED_REQUEST_HEADERS = ("content-type", "accept", "idempotency-key", "x-request-id")
 FORWARDED_RESPONSE_HEADERS = ("content-type", "idempotent-replay", "retry-after")
+FORWARDED_GRAPHQL_HEADERS = ("content-type", "accept", "x-request-id", "x-cellarch-csrf")
 RETRY_AFTER = {"Retry-After": "1"}
 READ_METHODS = frozenset({"GET", "HEAD"})
 FROZEN = "frozen"  # being moved: reads only
@@ -76,6 +79,9 @@ class CellSettings:
     # Requests handled at once; more are rejected with 503 cell_overloaded.
     max_concurrent_requests: int = 100
     stack_timeout_seconds: float = 10.0
+    # The cell's mgr (web UI backend); /graphql is off without it.
+    mgr_url: str | None = None
+    mgr_token: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         _check_service_url(self.tenant_service_url)
@@ -92,6 +98,8 @@ class CellSettings:
             tenant_service_url=os.environ.get("TENANT_SERVICE_URL", DEFAULT_SERVICE_URL),
             max_concurrent_requests=int(os.environ.get("MAX_CONCURRENT_REQUESTS", "100")),
             stack_timeout_seconds=float(os.environ.get("STACK_TIMEOUT", "10")),
+            mgr_url=os.environ.get("MGR_URL") or None,
+            mgr_token=os.environ.get("MGR_TOKEN") or None,
         )
 
 
@@ -185,7 +193,7 @@ def create_app(
             upstream = await http.request(
                 request.method,
                 url,
-                params=request.query_params,
+                params=list(request.query_params.multi_items()),
                 content=await request.body(),
                 headers=headers,
             )
@@ -211,6 +219,42 @@ def create_app(
             return await forward(request, tenant, resource, rest)
 
         app.add_api_route(f"/v1/{resource}{{rest:path}}", route, methods=methods)
+
+    if settings.mgr_url and settings.mgr_token:
+        mgr_url, mgr_token = settings.mgr_url.rstrip("/"), settings.mgr_token
+
+        @app.api_route("/graphql", methods=["GET", "POST"])
+        async def graphql(request: Request, tenant: Tenant) -> Response:
+            """The web UI's GraphQL, answered by this cell's mgr for a tenant it hosts."""
+            entry = store.get_tenant(tenant)
+            if entry is None or entry["status"] not in ("active", FROZEN):
+                raise ApiError(503, "tenant_not_ready", "the tenant is being set up", RETRY_AFTER)
+            if entry["status"] == FROZEN and request.method not in READ_METHODS:
+                raise ApiError(
+                    503, "tenant_migrating", "the tenant is being moved; retry shortly", RETRY_AFTER
+                )
+            headers = {k: v for k, v in request.headers.items() if k in FORWARDED_GRAPHQL_HEADERS}
+            headers[TENANT_HEADER] = tenant
+            headers[INTERNAL_TOKEN_HEADER] = mgr_token
+            try:
+                upstream = await http.request(
+                    request.method,
+                    f"{mgr_url}/graphql",
+                    params=list(request.query_params.multi_items()),
+                    content=await request.body(),
+                    headers=headers,
+                )
+            except httpx.HTTPError as exc:
+                raise ApiError(
+                    503, "mgr_unavailable", "the cell's UI backend is unavailable", RETRY_AFTER
+                ) from exc
+            return Response(
+                content=upstream.content,
+                status_code=upstream.status_code,
+                headers={
+                    k: v for k, v in upstream.headers.items() if k in FORWARDED_RESPONSE_HEADERS
+                },
+            )
 
     # --- internal API (control plane only, this cell's credential) ----------------------
 

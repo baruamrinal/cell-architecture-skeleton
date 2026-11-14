@@ -1,6 +1,6 @@
 """SQLite helpers. Each cell and the control plane own a separate database file.
 
-On AWS the same store interfaces are backed by Aurora PostgreSQL (stage 5).
+On AWS the same store interfaces are backed by Aurora PostgreSQL (stage 6).
 """
 
 import sqlite3

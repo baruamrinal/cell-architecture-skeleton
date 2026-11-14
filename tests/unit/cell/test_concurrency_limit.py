@@ -73,3 +73,18 @@ def test_setting_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     assert CellSettings.from_env().max_concurrent_requests == 25
     monkeypatch.delenv("MAX_CONCURRENT_REQUESTS")
     assert CellSettings.from_env().max_concurrent_requests == 100
+
+
+def test_a_full_cell_answers_the_web_ui_with_a_graphql_error() -> None:
+    import json
+
+    limit = ConcurrencyLimit(ok_app, max_concurrent=1, cell_id="cell-x")
+    limit.in_flight = 1  # one request is already being handled
+    messages = asyncio.run(call(limit, path="/graphql"))
+    body = json.loads(messages[1]["body"])
+    assert status(messages) == 503
+    assert body["errors"][0]["extensions"] == {
+        "code": "cell_overloaded",
+        "status": 503,
+        "retryAfter": 1,
+    }
