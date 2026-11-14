@@ -109,7 +109,7 @@ Without a `.env` file and with no token set, `cellctl` asks for one rather than 
 | `CELLCTL_CHARTS_DIR` | `--charts-dir` | `charts` (the Helm charts `cells deploy` installs) |
 | `CELLCTL_ACTOR` | `--actor` | your OS user name; recorded as who created or changed cells and tenants |
 
-**Who did what:** cells and tenants record `created_by` and `updated_by` as `admin:<your-name>`. They appear in the JSON and in a **CREATED BY** column in `cells list` and `tenants list`. Seeded cells show `config`. Records from before this feature show `unknown`. Locally the name part is self-reported, because everyone shares the admin token. On AWS (stage 5) it becomes the verified IAM identity of the caller.
+**Who did what:** cells and tenants record `created_by` and `updated_by` as `admin:<your-name>`. They appear in the JSON and in a **CREATED BY** column in `cells list` and `tenants list`. Seeded cells show `config`. Records from before this feature show `unknown`. Locally the name part is self-reported, because everyone shares the admin token. On AWS (stage 6) it becomes the verified IAM identity of the caller.
 
 If `cellctl` is "not recognized", the virtual environment isn't active in that terminal. If activation fails with "running scripts is disabled", run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
 
@@ -168,8 +168,8 @@ No restart and no hand-edited files are needed. The control plane checks the new
 | `cell-id` | Unique name: 2–63 lowercase letters, digits or hyphens. | — |
 | `--capacity` | Maximum tenants on the cell. Fill-first places tenants up to 75% of it, then uses the remaining room. | Control plane's `DEFAULT_CELL_CAPACITY` (4 locally) |
 | `--type` | `shared` for many tenants; `dedicated` is reserved for one tenant and never used for pooled placement. | `shared` |
-| `--size` | `small`, `medium` or `large`. A label for now; maps to AWS sizes in stage 5. | `small` |
-| `--wave` | Release wave for cell-by-cell rollouts (stage 6); `0` is the canary. | `1` |
+| `--size` | `small`, `medium` or `large`. A label for now; maps to AWS sizes in stage 6. | `small` |
+| `--wave` | Release wave for cell-by-cell rollouts (stage 7); `0` is the canary. | `1` |
 | `--image` | Gateway image loaded into the new cluster. | `cellarch/cell-gateway:dev` (built by `make up` / `make build`) |
 
 The cell's credential is stored only as a Kubernetes secret in its own cluster, and in the control plane.
@@ -308,7 +308,7 @@ TIME                              ACTOR         ACTION         OUTCOME    TENANT
 
 Newest first. `--cell`, `--limit` and `--cursor` page through the rest. Raw form: `GET /v1/audit`.
 
-Seasonal schedules (stage 4) will be added here.
+Seasonal schedules (stage 5) will be added here.
 
 ### Platform overview
 

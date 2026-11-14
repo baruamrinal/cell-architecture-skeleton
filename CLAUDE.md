@@ -6,7 +6,7 @@ Reference implementation of cell-based architecture for a multi-tenant SaaS plat
 
 ## Status
 
-Stages 1, 2, 2.5, 2.6 and 3 implemented: core platform, traffic protection, per-tenant services (each tenant's own user-account + order-processing containers and database on its cell's Postgres), the Kubernetes runtime (k3d locally: a platform cluster + one cluster per cell; Helm charts `platform`, `cell`, `tenant-stack`), and tenant moves (move procedure with rollback, audit log, promote/demote, drain, consolidate). Next: stage 4 (seasonal scaling). Work proceeds in the delivery stages in docs/plan.md §13, one stage at a time.
+Stages 1, 2, 2.5, 2.6 and 3 implemented: core platform, traffic protection, per-tenant services (each tenant's own user-account + order-processing containers and database on its cell's Postgres), the Kubernetes runtime (k3d locally: a platform cluster + one cluster per cell; Helm charts `platform`, `cell`, `tenant-stack`), and tenant moves (move procedure with rollback, audit log, promote/demote, drain, consolidate). Next: stage 4 (tenant web UI: `mgr` GraphQL backend + `web-ui` React front end, docs/plan.md §2.4). Seasonal scaling is now stage 5; its work in progress is parked on branch `feat/seasonal-schedules`. Work proceeds in the delivery stages in docs/plan.md §13, one stage at a time.
 
 ## Working agreements
 
@@ -58,7 +58,8 @@ If a change can't meet one of these, say so in the PR and record it in the decis
 ## Layout (planned)
 
 ```
-src/cellarch/{common, control_plane, data_plane/{router,cell}}
+src/cellarch/{common, control_plane, data_plane/{router,cell}, services, mgr}
+web-ui/                    React + TypeScript front end (pnpm)
 tests/
 scripts/demo.py
 infra/{bootstrap, customer-bootstrap, modules, stacks, envs}
