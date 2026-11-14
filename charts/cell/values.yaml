@@ -11,7 +11,7 @@ image:
 # Locally `make up` / `cellctl cells deploy` set it; in production External Secrets.
 # The database server's admin password is generated in the cluster and kept across
 # upgrades; it never leaves the cell. An existingSecret needs both keys:
-# internal-token and postgres-password.
+# internal-token, postgres-password and mgr-token.
 secrets:
   create: true
   existingSecret: ""
@@ -19,6 +19,8 @@ secrets:
 
 gateway:
   maxConcurrentRequests: 100
+  # The cell's mgr (release "mgr", charts/mgr): the web UI's GraphQL backend.
+  mgrUrl: http://mgr:8000
   service:
     type: LoadBalancer          # the cell's entry point: internal NLB in production,
     port: 8000                  # the cell cluster's load balancer on the private network locally

@@ -34,15 +34,17 @@ def test_required_secrets() -> None:
 def test_images_one_per_component() -> None:
     objects = render("platform", {**REQUIRED, "image": {"repository": "reg.example/cellarch"}})
     images = {c["name"]: c["image"] for c in containers(objects)}
+    edge = images.pop("edge")  # the local edge proxy: a pinned nginx image, not ours
     assert images == {
         "router": "reg.example/cellarch/router:dev",
         "control-plane": "reg.example/cellarch/control-plane:dev",
     }
+    assert "@sha256:" in edge
 
 
 def test_containers_are_hardened_with_probes_and_limits() -> None:
     objects = render("platform", {**REQUIRED, "redis": {"enabled": True}})
-    assert len(containers(objects)) == 3
+    assert len(containers(objects)) == 4  # router, control plane, Redis, edge
     for container in containers(objects):
         security = container["securityContext"]
         assert security["runAsNonRoot"] is True, container["name"]
@@ -101,14 +103,46 @@ def test_redis_is_opt_in() -> None:
 
 
 def test_services_and_exposure() -> None:
+    objects = render("platform", REQUIRED)
+    assert find(objects, "Service", "router")["spec"]["type"] == "ClusterIP"
+    assert find(objects, "Service", "control-plane")["spec"]["type"] == "ClusterIP"
+    alone = render(
+        "platform",
+        {**REQUIRED, "edge": {"enabled": False}, "router": {"service": {"type": "LoadBalancer"}}},
+    )
+    assert find(alone, "Service", "router")["spec"]["type"] == "LoadBalancer"
+    assert not [o for o in alone if "edge" in o["metadata"]["name"]]
+
+
+def test_the_edge_serves_every_tenant_host_on_one_port() -> None:
+    """Local stand-in for the production ALB's path rules (docs/plan.md §2.4)."""
+    objects = render("platform", {**REQUIRED, "edge": {"service": {"port": 8080}}})
+    service = find(objects, "Service", "edge")
+    assert (service["spec"]["type"], service["spec"]["ports"][0]["port"]) == ("LoadBalancer", 8080)
+    edge = find(objects, "Deployment", "edge")
+    (container,) = edge["spec"]["template"]["spec"]["containers"]
+    assert "nginx-unprivileged" in container["image"] and "@sha256:" in container["image"]
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True
+    config = find(objects, "ConfigMap", "edge")["data"]["default.conf"]
+    assert "location /auth/" in config and "http://dev-idp:8000" in config
+    assert "location /" in config and "-router:8000" in config
+    assert "proxy_set_header Host $host" in config  # the tenant comes from the host
+
+
+def test_the_router_checks_web_ui_sessions() -> None:
     objects = render(
         "platform",
-        {**REQUIRED, "router": {"service": {"type": "LoadBalancer", "port": 8080}}},
+        {
+            **REQUIRED,
+            "sessions": {"issuer": "http://localhost:8080/auth", "baseDomain": "localhost"},
+        },
     )
-    router_service = find(objects, "Service", "router")
-    assert router_service["spec"]["type"] == "LoadBalancer"
-    assert router_service["spec"]["ports"][0]["port"] == 8080
-    assert find(objects, "Service", "control-plane")["spec"]["type"] == "ClusterIP"
+    router = next(c for c in containers(objects) if c["name"] == "router")
+    variables = env(router)
+    assert variables["SESSION_JWKS_URL"] == "http://dev-idp:8000/auth/.well-known/jwks.json"
+    assert variables["SESSION_ISSUER"] == "http://localhost:8080/auth"
+    assert variables["SESSION_AUDIENCE"] == "cellarch-web"
+    assert variables["TENANT_BASE_DOMAIN"] == "localhost"
 
 
 def test_network_policies_default_deny_and_explicit_allows() -> None:

@@ -34,6 +34,7 @@ spec:
         {{- include "cell.labels" (dict "root" . "component" "gateway") | nindent 8 }}
     spec:
       serviceAccountName: {{ $name }}
+      priorityClassName: cellarch-api
       automountServiceAccountToken: true   # writes tenant stack secrets (rbac.yaml)
       securityContext:
         fsGroup: 10001
@@ -65,6 +66,14 @@ spec:
             # The cell's database server, as its admin login.
             - name: TENANT_DB_ADMIN_URL
               value: "postgresql://postgres:$(POSTGRES_PASSWORD)@{{ include "cell.fullname" . }}-postgres:5432/postgres"
+            # The web UI's GraphQL goes to the cell's mgr, with this credential.
+            - name: MGR_URL
+              value: {{ .Values.gateway.mgrUrl | quote }}
+            - name: MGR_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cell.secretName" . }}
+                  key: mgr-token
             # Where each tenant's services answer (Services of the tenant-stack chart).
             - name: TENANT_SERVICE_URL
               value: "http://tenant-{tenant}-{service}:8000"

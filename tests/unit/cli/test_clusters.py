@@ -120,7 +120,10 @@ def test_helm_values_go_in_a_temporary_file_never_on_the_command_line() -> None:
 def test_helm_reuse_values_for_existing_releases() -> None:
     runner = FakeRunner()
     toolkit(runner).helm_upgrade("cell-2", "cell", Path("charts/cell"), {}, reuse_values=True)
-    assert "--reuse-values" in runner.commands()[0]
+    # Keeps the values it was installed with, but takes defaults the chart has gained since
+    # (plain --reuse-values would drop them, e.g. a new gateway setting).
+    assert "--reset-then-reuse-values" in runner.commands()[0]
+    assert " --reuse-values" not in runner.commands()[0]
 
 
 def test_node_ip_on_the_private_network() -> None:

@@ -194,7 +194,7 @@ class LocalClusters:
                 "--wait", "--timeout", "300s",
             ]  # fmt: skip
             if reuse_values:
-                cmd.append("--reuse-values")
+                cmd.append("--reset-then-reuse-values")
             self._exec(cmd)
         finally:
             Path(path).unlink(missing_ok=True)

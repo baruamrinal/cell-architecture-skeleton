@@ -116,3 +116,23 @@ def test_only_the_gateway_and_tenant_services_reach_the_database() -> None:
     } in selectors
     assert {"cellarch.io/role": "tenant-service"} in selectors
     assert policy["spec"]["ingress"][0]["ports"] == [{"port": 5432, "protocol": "TCP"}]
+
+
+def test_the_gateway_sends_the_web_ui_to_the_cells_mgr() -> None:
+    objects = render("cell", REQUIRED)
+    secret = find(objects, "Secret", "cell")
+    token = secret["stringData"]["mgr-token"]
+    assert len(token) == 32 and token.isalnum()  # generated in the cluster, kept on upgrade
+    (container,) = containers(objects)
+    variables = env(container)
+    assert variables["MGR_URL"] == "http://mgr:8000"
+    name = secret["metadata"]["name"]
+    assert variables["MGR_TOKEN"] == {"secretKeyRef": {"name": name, "key": "mgr-token"}}
+
+
+def test_the_api_is_scheduled_before_the_ui() -> None:
+    objects = render("cell", REQUIRED)
+    classes = {o["metadata"]["name"]: o["value"] for o in objects if o["kind"] == "PriorityClass"}
+    assert classes["cellarch-api"] > classes["cellarch-ui"]
+    pod = find(objects, "Deployment", "gateway")["spec"]["template"]["spec"]
+    assert pod["priorityClassName"] == "cellarch-api"

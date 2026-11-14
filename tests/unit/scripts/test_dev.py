@@ -85,15 +85,26 @@ class FakeClusters:
     def delete_network(self) -> None:
         self._record("delete-network")
 
-    def helm(self, short: str) -> tuple[Any, ...]:
-        return next(c for c in self.calls if c[0] == "helm" and c[1] == short)
+    def helm(self, short: str, release: str = "cellarch") -> tuple[Any, ...]:
+        return next(c for c in self.calls if c[0] == "helm" and c[1:3] == (short, release))
 
 
 @pytest.fixture
 def root(tmp_path: Path) -> Path:
     (tmp_path / "charts").mkdir()
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    mgr = tmp_path / "src" / "cellarch" / "mgr"
+    mgr.mkdir(parents=True)
+    (mgr / "__init__.py").write_text('"""mgr."""\n\n__version__ = "0.4.2"\n')
     return tmp_path
+
+
+def clean_git(cmd: Sequence[str]) -> str:
+    """git as a clean checkout at commit abc1234 answers it."""
+    return "abc1234\n" if "rev-parse" in cmd else ""
+
+
+MGR_TAG = "0.4.2-abc1234"
 
 
 def make_venv(root: Path) -> Path:
@@ -108,13 +119,15 @@ def make_venv(root: Path) -> Path:
 
 def up(root: Path, clusters: FakeClusters, run: FakeRunner | None = None, **kw: Any) -> int:
     return dev.main(
-        ["up"],
+        [kw.get("target", "up")],
         root=root,
         run=run or FakeRunner(),
         clusters=clusters,
         port_in_use=kw.get("port_in_use", lambda port: False),
         answers=kw.get("answers", lambda url: True),
         sleep=kw.get("sleep", lambda seconds: None),
+        git=kw.get("git", clean_git),
+        now=kw.get("now", lambda: 1_700_000_000.0),
     )
 
 
@@ -242,7 +255,7 @@ class TestUp:
         )
         assert clusters.calls[2] == ("cluster", "cell-1", ())
         builds = [c for c in run.commands if c[:2] == ["docker", "build"]]
-        assert [c[3] for c in builds] == dev.IMAGES
+        assert [c[3] for c in builds] == [*dev.IMAGES, "mgr"]
         assert (
             "import",
             "platform",
@@ -269,12 +282,54 @@ class TestUp:
         assert platform["controlPlane"]["seedCells"] == {
             "cell-1": "http://cell-1.cellarch.internal:8000"
         }
-        assert platform["router"]["service"] == {"type": "LoadBalancer", "port": 8080}
+        assert platform["router"]["service"] == {"type": "ClusterIP", "port": 8000}
+        assert platform["edge"] == {
+            "enabled": True,
+            "service": {"type": "LoadBalancer", "port": 8080},
+        }
+        assert platform["sessions"]["baseDomain"] == "localhost"
         assert platform["controlPlane"]["service"] == {"type": "LoadBalancer", "port": 8000}
         assert platform["redis"] == {"enabled": False}
         # The platform is installed last, once every cell answers by name.
         assert clusters.calls[-1][0:2] == ("helm", "platform")
         assert run.commands[-1][-1] == "status"
+
+    def test_installs_mgr_in_every_cell_and_the_dev_identity_provider(self, root: Path) -> None:
+        make_venv(root)
+        (root / ".env").write_text("CELLS=cell-1, cell-2\n")
+        clusters, run = FakeClusters(), FakeRunner()
+
+        assert up(root, clusters, run) == 0
+
+        build = ["docker", "build", "--target", "mgr", "-t", f"cellarch/mgr:{MGR_TAG}", str(root)]
+        assert build in run.commands
+        for cell in ("cell-1", "cell-2"):
+            assert ("import", cell, (f"cellarch/mgr:{MGR_TAG}",)) in clusters.calls
+            mgr = next(c for c in clusters.calls if c[:3] == ("helm", cell, "mgr"))
+            assert mgr[3:] == ("mgr", {"cellId": cell, "image": {"tag": MGR_TAG}}, False)
+        assert ("import", "platform", ("cellarch/dev-idp:dev",)) in clusters.calls
+        idp = next(c for c in clusters.calls if c[:3] == ("helm", "platform", "dev-idp"))
+        assert idp[3] == "dev-idp"
+        assert idp[4]["baseDomain"] == "localhost"
+        assert dev.read_versions(root) == {"mgr": MGR_TAG}
+
+    def test_mgr_from_a_changed_working_tree_gets_a_fresh_tag(self, root: Path) -> None:
+        make_venv(root)
+
+        def dirty(cmd: Sequence[str]) -> str:
+            return " M src/cellarch/mgr/app.py\n" if "status" in cmd else clean_git(cmd)
+
+        assert up(root, FakeClusters(), git=dirty) == 0
+        assert dev.read_versions(root)["mgr"] == "0.4.2-abc1234-dirty.1700000000"
+
+    def test_without_git_the_tag_says_so(self, root: Path) -> None:
+        make_venv(root)
+
+        def no_git(cmd: Sequence[str]) -> str:
+            raise OSError("git not found")
+
+        assert up(root, FakeClusters(), git=no_git) == 0
+        assert dev.read_versions(root)["mgr"] == "0.4.2-local.1700000000"
 
     def test_more_seed_cells_and_defaults(self, root: Path) -> None:
         make_venv(root)
@@ -362,6 +417,50 @@ class TestUp:
         assert "CELLS" in capsys.readouterr().err
 
 
+class TestDeployMgr:
+    """`make deploy-mgr`: ship mgr alone, to every cell, without `make up`."""
+
+    def test_builds_and_upgrades_only_mgr_in_every_running_cell(self, root: Path) -> None:
+        make_venv(root)
+        clusters = FakeClusters({"platform": "running", "cell-1": "running", "cell-2": "running"})
+        run = FakeRunner()
+
+        assert up(root, clusters, run, target="deploy-mgr") == 0
+
+        builds = [c for c in run.commands if c[:2] == ["docker", "build"]]
+        build = ["docker", "build", "--target", "mgr", "-t", f"cellarch/mgr:{MGR_TAG}", str(root)]
+        assert builds == [build]
+        assert [c for c in clusters.calls if c[0] == "helm"] == [
+            ("helm", cell, "mgr", "mgr", {"cellId": cell, "image": {"tag": MGR_TAG}}, False)
+            for cell in ("cell-1", "cell-2")
+        ]
+        assert dev.read_versions(root) == {"mgr": MGR_TAG}
+
+    def test_stopped_cells_are_skipped_and_failures_stop_it(self, root: Path) -> None:
+        make_venv(root)
+        clusters = FakeClusters({"platform": "running", "cell-1": "running", "cell-2": "stopped"})
+        assert up(root, clusters, target="deploy-mgr") == 0
+        assert not any(c[:2] == ("helm", "cell-2") for c in clusters.calls)
+        failing = FakeClusters({"platform": "running", "cell-1": "running"})
+        assert up(root, failing, FakeRunner(fail_on="mgr"), target="deploy-mgr") == 1
+        nothing = FakeClusters({"platform": "running"})
+        assert up(root, nothing, target="deploy-mgr") == 1  # no cells to deploy to
+
+    def test_a_package_without_a_version_is_an_error(self, root: Path) -> None:
+        from cellarch.cli.versions import source_version
+
+        (root / "x.py").write_text("print('no version')")
+        with pytest.raises(ValueError, match="__version__"):
+            source_version(root / "x.py")
+
+    def test_versions_file(self, root: Path) -> None:
+        assert dev.read_versions(root) == {}
+        dev.write_version(root, "mgr", "1.0.0-a")
+        dev.write_version(root, "user-account", "2.0.0-b")
+        dev.write_version(root, "mgr", "1.0.1-c")
+        assert dev.read_versions(root) == {"mgr": "1.0.1-c", "user-account": "2.0.0-b"}
+
+
 class TestOtherTargets:
     def call(self, target: str, root: Path, clusters: FakeClusters, run: FakeRunner) -> int:
         return dev.main(
@@ -392,7 +491,7 @@ class TestOtherTargets:
     def test_build_only_builds(self, root: Path) -> None:
         clusters, run = FakeClusters(), FakeRunner()
         assert self.call("build", root, clusters, run) == 0
-        assert [c[3] for c in run.commands] == dev.IMAGES
+        assert [c[3] for c in run.commands] == [*dev.IMAGES, "mgr"]
         assert clusters.calls == []
 
     def test_status_test_and_setup(self, root: Path) -> None:

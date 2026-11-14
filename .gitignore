@@ -222,3 +222,6 @@ __marimo__/
 # cellctl-generated compose files for deployed cells (contain cell credentials)
 deploy/cells/
 tenant-data/
+
+# What this machine's clusters run (written by make up / make deploy-*).
+deploy/versions/local.yaml

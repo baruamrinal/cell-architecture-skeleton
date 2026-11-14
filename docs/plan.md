@@ -170,7 +170,7 @@ browser ─▶ ingress ─┬─ /          ─▶ web-ui (static files, platfor
 - `charts/web-ui` (platform cluster) and `charts/mgr` (every cell cluster): Deployment, Service, autoscaler (min and max replicas and target utilisation set per release), PodDisruptionBudget and NetworkPolicy, with resource requests and limits on every pod.
 - Network access: `web-ui` makes no outbound calls; `mgr` accepts traffic only from its cell's gateway and can call only that gateway.
 - Scheduling priority: the router above `web-ui` in the platform cluster; the gateway and tenant services above `mgr` in each cell, so UI load can't crowd out the API.
-- Ingress serves every tenant host (`*.platform.com`) and routes by path (`/` to `web-ui`, `/graphql` and `/auth` to the router side), so no CORS setup is needed: the UI and its API are always on the same host.
+- Ingress serves every tenant host (`*.platform.com`) and routes by path (`/` to `web-ui`, `/graphql` to the router, `/auth` to the identity provider), so no CORS setup is needed: the UI and its API are always on the same host. Production: the ALB's path rules. Locally: an **edge proxy** (unprivileged nginx, in the platform chart, `edge.enabled`) takes `localhost:8080` for every tenant host and keeps the `Host` header, because the router takes the tenant from it.
 - Replicas: 1 each locally; in production at least 2 across availability zones for `web-ui` and for `mgr` in every cell.
 
 **Acceptance criteria** (written test-first in the `mgr` and `web-ui` PRs):

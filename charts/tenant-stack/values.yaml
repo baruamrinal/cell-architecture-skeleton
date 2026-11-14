@@ -11,6 +11,8 @@ image:
   pullPolicy: IfNotPresent
 
 replicas: 1
+# Scheduled as API, above the web UI's backend (the classes come with the cell chart).
+priorityClassName: cellarch-api
 
 # Per service, by tier (docs/plan.md §3.4).
 resources:

@@ -7,6 +7,11 @@
 #   docker build --target cell-gateway     -t cellarch/cell-gateway:dev .
 #   docker build --target user-account     -t cellarch/user-account:dev .
 #   docker build --target order-processing -t cellarch/order-processing:dev .
+#   docker build --target dev-idp          -t cellarch/dev-idp:dev .   (development only)
+#   docker build --target mgr              -t cellarch/mgr:<version>-<commit> .
+#
+# mgr is delivered on its own (docs/plan.md §2.4): its own version and tag, and its own
+# extra dependencies (the `mgr` extra), which no other image installs.
 #
 # Each image contains only its own code, the shared library (cellarch.common) and the
 # dependencies. `make up` builds all five and loads them into the local k3d clusters.
@@ -22,6 +27,10 @@ COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
 RUN pip install --no-cache-dir --upgrade pip \
  && pip wheel --no-cache-dir --wheel-dir /wheels .
+
+# mgr's own extra dependencies (GraphQL).
+FROM build AS build-mgr
+RUN pip wheel --no-cache-dir --wheel-dir /wheels-mgr ".[mgr]"
 
 # --- hardened runtime base: dependencies only, non-root ------------------------------
 FROM ${PYTHON_IMAGE} AS base
@@ -69,3 +78,14 @@ COPY src/cellarch/services/common /app/cellarch/services/common
 COPY src/cellarch/services/order_processing /app/cellarch/services/order_processing
 CMD ["uvicorn", "cellarch.services.order_processing.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
 
+FROM base AS dev-idp
+COPY src/cellarch/dev_idp /app/cellarch/dev_idp
+CMD ["uvicorn", "cellarch.dev_idp.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+
+FROM base AS mgr
+USER root
+COPY --from=build-mgr /wheels-mgr /wheels
+RUN pip install --no-cache-dir $(ls /wheels/*.whl | grep -v '/cellarch-')  && rm -rf /wheels
+USER 10001
+COPY src/cellarch/mgr /app/cellarch/mgr
+CMD ["uvicorn", "cellarch.mgr.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

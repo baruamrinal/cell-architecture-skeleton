@@ -22,6 +22,9 @@ spec:
         {{- include "stack.labels" $ctx | nindent 8 }}
     spec:
       automountServiceAccountToken: false
+      {{- with $.Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
       containers:
         - name: {{ $service }}
           image: {{ $.Values.image.repository }}/{{ $service }}:{{ $.Values.image.tag }}

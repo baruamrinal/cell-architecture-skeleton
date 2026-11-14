@@ -1,0 +1,18 @@
+# DEVELOPMENT ONLY: anyone who reaches a tenant's host can sign in there. Install as
+# release "dev-idp" in the local platform cluster; production uses the identity provider
+# chosen with the infrastructure (stage 6), behind the same token interface.
+
+image:
+  repository: cellarch
+  tag: dev
+  pullPolicy: IfNotPresent
+
+issuer: http://localhost:8080/auth   # the "iss" of its tokens; the router expects the same
+audience: cellarch-web
+baseDomain: localhost                # tenants sign in on <tenant>.<baseDomain>
+cookieSecure: true                   # browsers treat *.localhost as secure
+sessionTtlSeconds: 28800
+
+resources:
+  requests: {cpu: 25m, memory: 64Mi}
+  limits: {cpu: 250m, memory: 128Mi}

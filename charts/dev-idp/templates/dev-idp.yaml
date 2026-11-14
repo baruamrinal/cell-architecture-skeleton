@@ -1,0 +1,111 @@
+{{- define "devIdp.labels" -}}
+app.kubernetes.io/name: dev-idp
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: dev-idp
+app.kubernetes.io/part-of: cellarch
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+{{- end -}}
+{{- define "devIdp.selector" -}}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: dev-idp
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dev-idp
+  labels:
+    {{- include "devIdp.labels" . | nindent 4 }}
+spec:
+  replicas: 1                      # its signing key lives in memory
+  selector:
+    matchLabels:
+      {{- include "devIdp.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "devIdp.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: dev-idp
+          image: {{ .Values.image.repository }}/dev-idp:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: DEV_IDP_ISSUER
+              value: {{ .Values.issuer | quote }}
+            - name: SESSION_AUDIENCE
+              value: {{ .Values.audience | quote }}
+            - name: TENANT_BASE_DOMAIN
+              value: {{ .Values.baseDomain | quote }}
+            - name: SESSION_COOKIE_SECURE
+              value: {{ .Values.cookieSecure | quote }}
+            - name: SESSION_TTL_SECONDS
+              value: {{ .Values.sessionTtlSeconds | quote }}
+          livenessProbe:
+            httpGet: {path: /auth/healthz, port: http}
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /auth/healthz, port: http}
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dev-idp
+  labels:
+    {{- include "devIdp.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "devIdp.selector" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP
+---
+# Sign-in comes through the edge; the router fetches the public keys.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dev-idp
+  labels:
+    {{- include "devIdp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "devIdp.selector" . | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: edge
+              app.kubernetes.io/part-of: cellarch
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: router
+              app.kubernetes.io/part-of: cellarch
+      ports:
+        - {port: 8000, protocol: TCP}

@@ -1,0 +1,141 @@
+{{- $tag := required "image.tag is required (<version>-<commit>, from the versions file)" .Values.image.tag -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mgr
+  labels:
+    {{- include "mgr.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "mgr.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mgr.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      containers:
+        - name: mgr
+          image: {{ .Values.image.repository }}/mgr:{{ $tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: CELL_ID
+              value: {{ include "mgr.cell" . | quote }}
+            - name: GATEWAY_URL
+              value: {{ .Values.gateway.url | quote }}
+            - name: MGR_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.tokenSecret.name }}
+                  key: {{ .Values.gateway.tokenSecret.key }}
+            - name: GRAPHQL_INTROSPECTION
+              value: {{ .Values.graphql.introspection | quote }}
+            - name: GRAPHQL_MAX_DEPTH
+              value: {{ .Values.graphql.maxDepth | quote }}
+            - name: GRAPHQL_MAX_COST
+              value: {{ .Values.graphql.maxCost | quote }}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mgr
+  labels:
+    {{- include "mgr.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "mgr.selector" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP
+{{- if .Values.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: mgr
+  labels:
+    {{- include "mgr.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mgr
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mgr
+  labels:
+    {{- include "mgr.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "mgr.selector" . | nindent 6 }}
+---
+# Only the cell's gateway reaches mgr (the cell chart denies all other ingress).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mgr
+  labels:
+    {{- include "mgr.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "mgr.selector" . | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: gateway
+              app.kubernetes.io/part-of: cellarch
+      ports:
+        - {port: 8000, protocol: TCP}

@@ -1,0 +1,21 @@
+# Scheduling priority in the cell's cluster (docs/plan.md §2.4): the API (gateway and
+# tenant services) above the web UI's backend (mgr), so UI load can't crowd out the API.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: cellarch-api
+  labels:
+    {{- include "cell.labels" (dict "root" . "component" "cell") | nindent 4 }}
+value: 1000
+globalDefault: false
+description: "cellarch API: the cell gateway and tenant services"
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: cellarch-ui
+  labels:
+    {{- include "cell.labels" (dict "root" . "component" "cell") | nindent 4 }}
+value: 100
+globalDefault: false
+description: "cellarch web UI backend (mgr)"

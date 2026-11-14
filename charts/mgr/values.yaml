@@ -1,0 +1,39 @@
+# mgr: the web UI's GraphQL backend. Install as release "mgr" in every cell's cluster,
+# next to the cell chart; the gateway finds it at http://mgr:8000.
+
+cellId: ""                      # required, e.g. cell-1
+
+image:
+  repository: cellarch          # images are <repository>/mgr:<tag>
+  tag: ""                       # required: <version>-<commit>, from the versions file
+  pullPolicy: IfNotPresent
+
+# The cell's gateway: mgr's only way to tenant data, and the only caller it accepts.
+gateway:
+  url: http://cellarch-cell-gateway:8000
+  tokenSecret:                  # created by the cell chart (generated in the cluster)
+    name: cellarch-cell
+    key: mgr-token
+
+graphql:
+  introspection: false          # on only for local development
+  maxDepth: 8
+  maxCost: 1000
+
+replicas: 1                     # used when autoscaling is off
+autoscaling:
+  enabled: true
+  minReplicas: 1                # at least 2 across availability zones in production
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  maxUnavailable: 1
+
+# Below the gateway and the tenant services (cellarch-api), so UI load can't crowd
+# out the API. The classes come with the cell chart.
+priorityClassName: cellarch-ui
+
+resources:
+  requests: {cpu: 50m, memory: 96Mi}
+  limits: {cpu: 500m, memory: 256Mi}
