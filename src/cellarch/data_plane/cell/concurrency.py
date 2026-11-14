@@ -9,6 +9,7 @@ import json
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from cellarch.common.errors import GRAPHQL_PATH
 from cellarch.common.headers import CELL_HEADER
 
 
@@ -34,7 +35,7 @@ class ConcurrencyLimit:
             await self.app(scope, receive, send)
             return
         if self.in_flight >= self.max_concurrent:
-            await self._reject(send)
+            await self._reject(send, scope["path"])
             return
         self.in_flight += 1
         try:
@@ -42,10 +43,13 @@ class ConcurrencyLimit:
         finally:
             self.in_flight -= 1
 
-    async def _reject(self, send: Send) -> None:
-        body = json.dumps(
-            {"error": "cell_overloaded", "message": f"{self.cell_id} is at capacity; retry"}
-        ).encode()
+    async def _reject(self, send: Send, path: str) -> None:
+        message = f"{self.cell_id} is at capacity; retry"
+        error: dict[str, object] = {"error": "cell_overloaded", "message": message}
+        if path == GRAPHQL_PATH:  # the web UI gets the same error as a GraphQL error
+            extensions = {"code": "cell_overloaded", "status": 503, "retryAfter": 1}
+            error = {"errors": [{"message": message, "extensions": extensions}], "data": None}
+        body = json.dumps(error).encode()
         await send(
             {
                 "type": "http.response.start",

@@ -92,6 +92,15 @@ class TestOrderProcessing:
         assert [o["user_id"] for o in listed] == ["usr_2"]
         assert listed[0]["total_cents"] == 300
 
+    def test_orders_of_several_users_in_one_call(self, tmp_path: Path) -> None:
+        client = orders_client(tmp_path, user_account_stub({"usr_1", "usr_2", "usr_3"}))
+        for user in ("usr_1", "usr_2", "usr_3"):
+            client.post("/v1/orders", json={**ORDER, "user_id": user})
+        listed = client.get("/v1/orders", params=[("user_id", "usr_1"), ("user_id", "usr_3")])
+        assert [o["user_id"] for o in listed.json()["items"]] == ["usr_1", "usr_3"]
+        too_many = client.get("/v1/orders", params=[("user_id", f"u{i}") for i in range(51)])
+        assert (too_many.status_code, too_many.json()["error"]) == (422, "too_many_users")
+
     def test_unknown_order(self, tmp_path: Path) -> None:
         client = orders_client(tmp_path, user_account_stub(set()))
         for response in (client.get("/v1/orders/nope"), client.post("/v1/orders/nope/cancel")):

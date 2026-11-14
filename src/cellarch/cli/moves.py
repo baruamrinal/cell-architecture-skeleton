@@ -12,7 +12,7 @@ containers:
 
 A failure before the switch rolls the move back: the target stack is uninstalled and
 the control plane unfreezes the source. After the switch the move only goes forward.
-Locally this runs in ``cellctl``; on AWS in the deployment pipeline (stage 6).
+Locally this runs in ``cellctl``; on AWS in the deployment pipeline (stage 7).
 """
 
 import contextlib

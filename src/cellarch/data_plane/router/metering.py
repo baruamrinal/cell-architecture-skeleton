@@ -1,7 +1,7 @@
 """Per-tenant usage counters in the router (docs/plan.md §4).
 
 Kept in memory and reset when the router restarts; each router replica counts its own
-traffic. Stage 5 exports the same numbers as metrics (OpenTelemetry -> CloudWatch).
+traffic. Stage 6 exports the same numbers as metrics (OpenTelemetry -> CloudWatch).
 Sustained throttling is the signal to move a tenant to a dedicated cell (stage 3).
 """
 

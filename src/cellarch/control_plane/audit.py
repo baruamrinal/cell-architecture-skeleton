@@ -2,7 +2,7 @@
 
 Handlers wrap a change in ``audit.record(...)``; the event is written when the block
 ends: ``succeeded``, ``refused`` (the API answered 4xx) or ``failed`` (5xx, or an
-unexpected error). On AWS the log is also shipped to CloudWatch Logs (stage 5).
+unexpected error). On AWS the log is also shipped to CloudWatch Logs (stage 6).
 """
 
 from collections.abc import Iterator

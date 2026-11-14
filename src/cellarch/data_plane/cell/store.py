@@ -5,7 +5,7 @@ request time). A tenant is ``provisioning`` until its stack is running, then ``a
 Tenant data lives in each tenant's own database (tenant_resources.py), never here.
 
 The stack credential is kept so the gateway can call the tenant's services; on AWS it
-comes from Secrets Manager instead (stage 5).
+comes from Secrets Manager instead (stage 6).
 """
 
 from typing import Any

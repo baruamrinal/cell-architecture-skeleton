@@ -31,7 +31,7 @@ Overview
 
 Configuration: --url / CELLCTL_URL (default http://localhost:8000), --token / CELLCTL_TOKEN
 (the admin credential) and, for deploy, --charts-dir / CELLCTL_CHARTS_DIR (default charts).
-Each cell is its own local k3d cluster. On AWS, stage 5 adds IAM signing and stage 6 makes
+Each cell is its own local k3d cluster. On AWS, stage 6 adds IAM signing and stage 7 makes
 deploy trigger the cell-lifecycle workflow.
 """
 

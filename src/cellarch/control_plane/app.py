@@ -61,7 +61,7 @@ def actor_label(role: str, actor: str | None) -> str:
     """``role:name`` for created_by / updated_by, or just ``role`` without a name.
 
     The role comes from the verified credential; the name is self-reported locally
-    (X-Actor) and becomes the verified IAM identity on AWS (stage 5).
+    (X-Actor) and becomes the verified IAM identity on AWS (stage 6).
     """
     if not actor:
         return role

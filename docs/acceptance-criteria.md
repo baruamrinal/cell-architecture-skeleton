@@ -143,3 +143,22 @@ Operations built on the move procedure (docs/plan.md §5.1).
 | A68 | a shared cell with several tenants | it is drained (`cellctl cells drain`) | it becomes `draining`, every tenant is moved to another cell with its data and new tenants never land on it; it is refused up front when the other cells lack room; after a failure part-way, running it again moves the rest |
 | A69 | an under-used shared cell | it is consolidated (`cellctl cells consolidate`) | its tenants are moved off with their data, then it is decommissioned |
 | A70 | a dedicated cell | it is registered with a capacity other than 1, a second tenant is moved into it, or a new tenant is onboarded | each is refused, or the new tenant is placed on a shared cell |
+
+## Stage 4: tenant web UI
+
+### mgr: the UI's GraphQL backend in every cell
+
+`mgr` serves the web UI's GraphQL API from inside each cell; every tenant has its own host (`acme.localhost`, `acme.platform.com`), and the router takes the tenant from the host and checks it against a verified session (docs/plan.md §2.4). IDs continue after the parked seasonal criteria (A71–A76).
+
+| ID | Given | When | Then |
+|---|---|---|---|
+| A77 | two tenants with users and orders, signed in to the UI | each queries and changes its users and orders through `/graphql` | each sees and changes only its own: asking for the other tenant's user or order id finds nothing |
+| A78 | a tenant's own host (`acme.localhost`) and the router's `/graphql` | a request comes without a session, with an expired or forged token, with a session for another tenant, or with an `X-Tenant-ID` header of its own | it is rejected before reaching any cell (`401 unauthenticated`, or `403 session_tenant_mismatch` for another tenant's session), and a client's `X-Tenant-ID` never overrides the host's tenant; the dev identity provider signs in for the host's tenant only |
+| A79 | a cell's `mgr` | a request reaches it for a tenant its cell doesn't host, or doesn't come through its gateway | the gateway answers `421` (the router follows the tenant to its cell) and `mgr` refuses calls without its gateway's credential |
+| A80 | a page of users with their orders | it is queried | all their orders load in one batched call to the cell, not one per user |
+| A81 | a tenant over its rate limit | it calls `/graphql` | it gets HTTP `429` with `Retry-After` and a GraphQL error whose extensions carry `code`, `status` and `retryAfter` |
+| A82 | a create mutation | it is retried with the same idempotency key | the same user or order comes back and no duplicate is made |
+| A83 | a query that is too deep or too costly, a mutation sent over GET, or a mutation without the anti-CSRF header | it reaches `mgr` | it is refused (`query_too_deep`, `query_too_costly`, `mutation_not_allowed`, `csrf_header_missing`) and nothing runs |
+| A84 | a signed-in tenant | the control plane is down | its UI queries and mutations keep working from the router's cached route |
+| A85 | a tenant being moved to another cell | it uses the UI during and after the move | during the move queries work and mutations get `tenant_migrating` with `Retry-After`; after the switch it is served by the new cell's `mgr` with its data |
+| A86 | `mgr`'s GraphQL schema and its use of `/v1` | the schema or the tenant services change | the committed schema must match the code, a breaking change against the published schema is detected, and contract tests pin every `/v1` call `mgr` makes |

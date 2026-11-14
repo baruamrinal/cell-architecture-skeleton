@@ -1,0 +1,70 @@
+type Me {
+  tenantId: String!
+  cellId: String!
+}
+
+type Mutation {
+  createUser(input: UserInput!, idempotencyKey: String = null): User!
+  deleteUser(id: ID!): Boolean!
+  createOrder(input: OrderInput!, idempotencyKey: String = null): Order!
+  cancelOrder(id: ID!): Order!
+}
+
+type Order {
+  id: ID!
+  userId: ID!
+  status: String!
+  lines: [OrderLine!]!
+  totalCents: Int!
+  createdAt: String!
+  updatedAt: String!
+  user: User
+}
+
+input OrderInput {
+  userId: ID!
+  lines: [OrderLineInput!]!
+}
+
+type OrderLine {
+  sku: String!
+  quantity: Int!
+  unitPriceCents: Int!
+}
+
+input OrderLineInput {
+  sku: String!
+  quantity: Int!
+  unitPriceCents: Int!
+}
+
+type OrderPage {
+  items: [Order!]!
+  nextCursor: String
+}
+
+type Query {
+  me: Me!
+  users(first: Int! = 20, after: String = null): UserPage!
+  user(id: ID!): User
+  orders(userId: ID = null, first: Int! = 20, after: String = null): OrderPage!
+  order(id: ID!): Order
+}
+
+type User {
+  id: ID!
+  email: String!
+  name: String!
+  createdAt: String!
+  orders(first: Int! = 5): [Order!]!
+}
+
+input UserInput {
+  email: String!
+  name: String!
+}
+
+type UserPage {
+  items: [User!]!
+  nextCursor: String
+}

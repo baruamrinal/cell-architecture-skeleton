@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -131,6 +132,29 @@ class TestRequests:
         assert order.status_code == 201 and order.json()["total_cents"] == 5
         assert listed.json()["items"][0]["id"] == order.json()["id"]
         assert listed.headers[CELL_HEADER] == "cell-x"
+
+    def test_repeated_query_parameters_reach_the_stack(self, cell: Cell) -> None:
+        cell.onboard()
+        headers = {TENANT_HEADER: "acme"}
+        ids = [
+            cell.client.post(
+                "/v1/users", json={"email": f"u{i}@acme.test", "name": "U"}, headers=headers
+            ).json()["id"]
+            for i in range(2)
+        ]
+        for user_id in ids:
+            cell.client.post(
+                "/v1/orders",
+                json={
+                    "user_id": user_id,
+                    "lines": [{"sku": "a", "quantity": 1, "unit_price_cents": 5}],
+                },
+                headers=headers,
+            )
+        listed = cell.client.get(
+            "/v1/orders", params=[("user_id", ids[0]), ("user_id", ids[1])], headers=headers
+        )
+        assert sorted(o["user_id"] for o in listed.json()["items"]) == sorted(ids)
 
     def test_other_paths_are_not_routed(self, cell: Cell) -> None:
         cell.onboard()
@@ -340,7 +364,7 @@ class TestMoves:
         assert (response.status_code, response.json()["error"]) == (502, "tenant_import_failed")
 
 
-def make_cell(tmp_path: Path) -> Cell:
+def make_cell(tmp_path: Path, *, mgr: bool = True) -> Cell:
     secrets, stacks = MemorySecrets(), StackHost()
     app = create_app(
         CellSettings(
@@ -349,6 +373,8 @@ def make_cell(tmp_path: Path) -> Cell:
             internal_token=TOKEN,
             tenant_db_admin_url=f"sqlite:///{tmp_path.as_posix()}/tenants",
             tenant_service_url=stack_url_template("cell-x"),
+            mgr_url="http://mgr.cell-x.stacks" if mgr else None,
+            mgr_token="mgr-token" if mgr else None,
         ),
         secrets=secrets,
         http_client=stacks.client(),
@@ -448,3 +474,44 @@ def test_an_export_refused_by_the_data_layer_keeps_its_code(
     monkeypatch.setattr(gateway, "export_tenant", refused)
     response = cell.client.get("/internal/tenants/acme/export", headers=INTERNAL)
     assert (response.status_code, response.json()["error"]) == (422, "invalid_export")
+
+
+class TestGraphqlForwarding:
+    """The gateway's /graphql: the cell's mgr, for tenants the cell hosts."""
+
+    def ask(self, cell: Cell, method: str = "GET") -> Any:
+        return cell.client.request(
+            method,
+            "/graphql",
+            params={"query": "{ me { tenantId } }"},
+            headers={TENANT_HEADER: "acme"},
+        )
+
+    def test_a_tenant_being_set_up_is_not_ready(self, cell: Cell) -> None:
+        cell.provision()
+        response = self.ask(cell)
+        assert (response.status_code, response.json()["errors"][0]["extensions"]["code"]) == (
+            503,
+            "tenant_not_ready",
+        )
+
+    def test_a_frozen_tenant_can_only_read(self, cell: Cell) -> None:
+        cell.onboard()
+        cell.client.post("/internal/tenants/acme/freeze", headers=INTERNAL)
+        response = self.ask(cell, "POST")
+        extensions = response.json()["errors"][0]["extensions"]
+        assert (response.status_code, extensions["code"], extensions["retryAfter"]) == (
+            503,
+            "tenant_migrating",
+            1,
+        )
+
+    def test_an_unreachable_mgr_is_unavailable(self, cell: Cell) -> None:
+        cell.onboard()  # this cell's mgr isn't running in the stack host
+        response = self.ask(cell)
+        assert response.json()["errors"][0]["extensions"]["code"] == "mgr_unavailable"
+
+    def test_without_an_mgr_there_is_no_graphql(self, tmp_path: Path) -> None:
+        bare = make_cell(tmp_path / "bare", mgr=False)
+        bare.onboard()
+        assert bare.client.get("/graphql", headers={TENANT_HEADER: "acme"}).status_code == 404

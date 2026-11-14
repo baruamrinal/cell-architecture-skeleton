@@ -2,7 +2,7 @@
 
 Used by ``cellctl cells deploy / decommission`` and by the operations built on them
 (promote, demote, consolidate). On AWS the same steps trigger ``cell-lifecycle.yml``
-(stage 6); the control plane never gets Docker or cluster access.
+(stage 7); the control plane never gets Docker or cluster access.
 """
 
 import secrets

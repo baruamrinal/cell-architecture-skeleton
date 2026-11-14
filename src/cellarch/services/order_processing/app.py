@@ -44,6 +44,7 @@ MIGRATIONS = [
     ),
 ]
 RETRY_AFTER = {"Retry-After": "1"}
+MAX_USERS_PER_LIST = 50  # user_id values one orders list may filter on
 
 
 @dataclass(frozen=True)
@@ -172,13 +173,18 @@ def create_app(
     def list_orders(
         limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
         cursor: str | None = None,
-        user_id: str | None = None,
+        # Repeatable (?user_id=a&user_id=b): the UI loads many users' orders in one call.
+        user_id: Annotated[list[str] | None, Query()] = None,
     ) -> OrderPage:
         query = "SELECT * FROM order_processing_orders WHERE tenant_id = ? AND seq > ?"
         params: list[Any] = [tenant, after_seq(cursor)]
-        if user_id is not None:
-            query += " AND user_id = ?"
-            params.append(user_id)
+        if user_id:
+            if len(user_id) > MAX_USERS_PER_LIST:
+                raise ApiError(
+                    422, "too_many_users", f"at most {MAX_USERS_PER_LIST} user_id values"
+                )
+            query += f" AND user_id IN ({', '.join('?' for _ in user_id)})"
+            params.extend(user_id)
         with db.connect() as conn:
             rows = conn.execute(f"{query} ORDER BY seq LIMIT ?", (*params, limit + 1)).fetchall()
         items, next_cursor = page(rows, limit)

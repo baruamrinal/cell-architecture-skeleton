@@ -273,3 +273,63 @@ class TestRouterApp:
         monkeypatch.setenv("ROUTE_CACHE_TTL_SECONDS", "2.5")
         settings = RouterSettings.from_env()
         assert (settings.control_plane_url, settings.cache_ttl_seconds) == ("http://cp:8000", 2.5)
+
+
+class TestWebUiSessions:
+    """The router's /graphql: the tenant from the host, proven by a session token."""
+
+    def test_without_session_settings_there_is_no_graphql(self) -> None:
+        client = router_client(ok(), lambda r: httpx.Response(200))
+        response = client.get("/graphql", headers={"host": "acme.localhost"})
+        assert (response.status_code, response.json()["errors"][0]["extensions"]["code"]) == (
+            404,
+            "not_found",
+        )
+
+    def test_a_bearer_token_works_like_the_cookie(self) -> None:
+        from cellarch.dev_idp.app import DevIdpSettings, issue_token
+        from cellarch.dev_idp.app import create_app as create_idp
+
+        idp = create_idp(DevIdpSettings(issuer="http://idp", cookie_secure=False))
+        idp_client = TestClient(idp)
+        seen: list[httpx.Request] = []
+
+        def dispatch(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "idp":
+                return httpx.Response(200, json=idp_client.get(request.url.path).json())
+            if request.url.host == "cp":
+                return ok()(request)
+            seen.append(request)
+            return httpx.Response(200, json={"data": {}})
+
+        app = create_app(
+            RouterSettings(
+                control_plane_url="http://cp",
+                router_token="router-t",
+                session_jwks_url="http://idp/auth/.well-known/jwks.json",
+                session_issuer="http://idp",
+            ),
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(dispatch)),
+        )
+        response = TestClient(app).get(
+            "/graphql",
+            headers={
+                "host": "acme.localhost",
+                "authorization": f"Bearer {issue_token(idp, 'acme')}",
+                TENANT_HEADER: "globex",
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert seen[0].headers[TENANT_HEADER] == "acme"
+        assert "authorization" not in seen[0].headers  # the token stays at the router
+
+    def test_settings_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CONTROL_PLANE_URL", "http://cp")
+        monkeypatch.setenv("ROUTER_TOKEN", "t")
+        monkeypatch.setenv("SESSION_JWKS_URL", "http://idp/jwks")
+        monkeypatch.setenv("TENANT_BASE_DOMAIN", "platform.test")
+        settings = RouterSettings.from_env()
+        assert (settings.session_jwks_url, settings.tenant_base_domain) == (
+            "http://idp/jwks",
+            "platform.test",
+        )

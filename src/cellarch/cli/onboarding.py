@@ -8,7 +8,7 @@ The control plane never starts containers, so the operator's tool runs the steps
 3. the control plane activates the tenant once the cell sees the stack ready.
 
 Any failure undoes every step done so far. Locally this runs in ``cellctl``; on AWS the
-same steps run in the deployment pipeline (Argo CD installs the stack, stage 6).
+same steps run in the deployment pipeline (Argo CD installs the stack, stage 7).
 """
 
 import contextlib
