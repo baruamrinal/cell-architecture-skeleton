@@ -12,6 +12,7 @@ from cellarch.common.contracts import RateLimit
 from cellarch.common.headers import INTERNAL_TOKEN_HEADER
 from cellarch.control_plane.app import ControlPlaneSettings, create_app, parse_rate_limit
 from cellarch.control_plane.store import ControlPlaneStore
+from tests.fakes import async_client
 
 from .test_cell_lifecycle_unit import fake_cells
 
@@ -57,7 +58,7 @@ def client(tmp_path: Path) -> TestClient:
             cell_credentials={"cell-1": "c1"},
             seed_cells={"cell-1": "http://cell-1"},
         ),
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(fake_cells({"cell-1": "c1"}))),
+        http_client=async_client(transport=httpx.MockTransport(fake_cells({"cell-1": "c1"}))),
     )
     return TestClient(app, headers={INTERNAL_TOKEN_HEADER: "admin-t"})
 

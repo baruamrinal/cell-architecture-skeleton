@@ -6,7 +6,7 @@ Reference implementation of cell-based architecture for a multi-tenant SaaS plat
 
 ## Status
 
-Stages 1, 2, 2.5, 2.6 and 3 implemented: core platform, traffic protection, per-tenant services (each tenant's own user-account + order-processing containers and database on its cell's Postgres), the Kubernetes runtime (k3d locally: a platform cluster + one cluster per cell; Helm charts `platform`, `cell`, `tenant-stack`), and tenant moves (move procedure with rollback, audit log, promote/demote, drain, consolidate). Stage 4 in progress (tenant web UI, docs/plan.md §2.4): `mgr` (GraphQL backend in every cell), the router's tenant-host session check and the dev identity provider run locally (`charts/mgr` in every cell, `charts/dev-idp`, the edge proxy, `make deploy-mgr`); `web-ui` comes next. Seasonal scaling is now stage 5; its work in progress is parked on branch `feat/seasonal-schedules`. Work proceeds in the delivery stages in docs/plan.md §13, one stage at a time.
+Stages 1, 2, 2.5, 2.6 and 3 implemented: core platform, traffic protection, per-tenant services (each tenant's own user-account + order-processing containers and database on its cell's Postgres), the Kubernetes runtime (k3d locally: a platform cluster + one cluster per cell; Helm charts `platform`, `cell`, `tenant-stack`), and tenant moves (move procedure with rollback, audit log, promote/demote, drain, consolidate). Stage 4 in progress (tenant web UI, docs/plan.md §2.4): `mgr` (GraphQL backend in every cell), the router's tenant-host session check and the dev identity provider run locally (`charts/mgr` in every cell, `charts/dev-idp`, the edge proxy, `make deploy-mgr`), and `web-ui` (React + TypeScript, pnpm; `charts/web-ui`, `make deploy-web-ui`) is served at `http://<tenant>.localhost:8080`. Next: the `ci:` PR (pnpm jobs, path filters, schema check, autoscaling smoke test). Seasonal scaling is now stage 5; its work in progress is parked on branch `feat/seasonal-schedules`. Work proceeds in the delivery stages in docs/plan.md §13, one stage at a time.
 
 ## Working agreements
 
@@ -69,6 +69,8 @@ docs/
 ```
 
 ## Commands
+
+Front end: Node.js 24 LTS (Corepack pins pnpm); in `web-ui/`: `corepack pnpm install | lint | typecheck | test | codegen | dev`.
 
 ```powershell
 . .\make up                # set up/activate .venv, load .env, k3d clusters (platform + one per cell), images, charts, status

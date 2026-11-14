@@ -35,7 +35,7 @@ from cellarch.dev_idp.app import DevIdpSettings
 from cellarch.dev_idp.app import create_app as create_dev_idp
 from cellarch.mgr.app import MgrSettings
 from cellarch.mgr.app import create_app as create_mgr
-from tests.fakes import MemorySecrets, StackHost, stack_url_template
+from tests.fakes import MemorySecrets, StackHost, async_client, stack_url_template
 
 ADMIN_TOKEN = "test-admin-token"
 ROUTER_TOKEN = "test-router-token"
@@ -90,7 +90,7 @@ def attach_mgr(stacks: StackHost, cell_id: str, gateway: ASGIApp) -> None:
             gateway_token=mgr_token(cell_id),
             introspection=True,
         ),
-        http_client=httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway)),
+        http_client=async_client(transport=httpx.ASGITransport(app=gateway)),
     )
 
 
@@ -256,7 +256,7 @@ class Platform:
                 cache_ttl_seconds=ROUTE_CACHE_TTL,
                 **settings,
             ),
-            http_client=httpx.AsyncClient(mounts=self.router_mounts),
+            http_client=async_client(mounts=self.router_mounts),
             clock=self.clock,
         )
         return TestClient(app, base_url="http://router-2")
@@ -377,7 +377,7 @@ def platform(tmp_path: Path) -> Iterator[Platform]:
             router_token=ROUTER_TOKEN,
             cell_credentials=dict(CELL_TOKENS),
         ),
-        http_client=httpx.AsyncClient(mounts=cell_mounts),
+        http_client=async_client(mounts=cell_mounts),
     )
     control_plane = Switch(control_plane_app)
 
@@ -397,7 +397,7 @@ def platform(tmp_path: Path) -> Iterator[Platform]:
             session_issuer=IDP_URL,
             session_audience=SESSION_AUDIENCE,
         ),
-        http_client=httpx.AsyncClient(mounts=router_mounts),
+        http_client=async_client(mounts=router_mounts),
         clock=clock,
     )
 

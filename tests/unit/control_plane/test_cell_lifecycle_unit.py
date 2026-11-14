@@ -13,6 +13,7 @@ from cellarch.control_plane.app import ControlPlaneSettings, create_app
 from cellarch.control_plane.cell_client import CellClient, CellVerificationError
 from cellarch.control_plane.credentials import LocalCredentialStore
 from cellarch.control_plane.store import ControlPlaneStore
+from tests.fakes import async_client
 
 ADMIN = "admin-t"
 CELL_3_TOKEN = "cell-3-credential-0123"
@@ -82,7 +83,7 @@ Handler = Callable[[httpx.Request], httpx.Response]
 
 
 def verify(handler: Handler, cell_id: str = "cell-3", token: str = CELL_3_TOKEN) -> None:
-    client = CellClient(httpx.AsyncClient(transport=httpx.MockTransport(handler)), {})
+    client = CellClient(async_client(transport=httpx.MockTransport(handler)), {})
     asyncio.run(client.verify(cell_id, "http://cell-3:8000", token))
 
 
@@ -160,7 +161,7 @@ def control_plane(tmp_path: Path, cell_tokens: dict[str, str]) -> TestClient:
             router_token="router-t",
             cell_credentials={},
         ),
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(fake_cells(cell_tokens))),
+        http_client=async_client(transport=httpx.MockTransport(fake_cells(cell_tokens))),
     )
     return TestClient(app, headers={INTERNAL_TOKEN_HEADER: ADMIN})
 

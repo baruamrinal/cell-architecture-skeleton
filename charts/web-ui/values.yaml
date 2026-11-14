@@ -1,0 +1,29 @@
+# web-ui: static files only. Install as release "web-ui" in the platform cluster; the
+# edge (the ALB in production) sends / on every tenant host here.
+
+image:
+  repository: cellarch          # images are <repository>/web-ui:<tag>
+  tag: ""                       # required: <version>-<commit>, from the versions file
+  pullPolicy: IfNotPresent
+
+# Served as /config.json and read by the app at start-up (never baked into the image).
+config:
+  graphqlPath: /graphql
+  signIn:
+    provider: dev               # the development-only identity provider locally
+    signInUrl: /auth/dev/sign-in
+    signOutUrl: /auth/sign-out
+
+replicas: 1                     # used when autoscaling is off
+autoscaling:
+  enabled: true
+  minReplicas: 1                # at least 2 across availability zones in production
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  maxUnavailable: 1
+
+resources:
+  requests: {cpu: 10m, memory: 16Mi}
+  limits: {cpu: 200m, memory: 64Mi}

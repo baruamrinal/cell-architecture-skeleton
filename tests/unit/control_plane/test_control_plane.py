@@ -11,6 +11,7 @@ from cellarch.common.headers import INTERNAL_TOKEN_HEADER
 from cellarch.control_plane.app import ControlPlaneSettings, create_app
 from cellarch.control_plane.cell_client import CellClient, MissingCellCredentialError
 from cellarch.control_plane.store import ControlPlaneStore, DuplicateError
+from tests.fakes import async_client
 
 from .test_cell_lifecycle_unit import fake_cells
 
@@ -18,7 +19,7 @@ from .test_cell_lifecycle_unit import fake_cells
 def test_cell_client_refuses_cells_without_credentials() -> None:
     import asyncio
 
-    client = CellClient(httpx.AsyncClient(), {"cell-1": "t"})
+    client = CellClient(async_client(), {"cell-1": "t"})
     assert client.has_credential("cell-1")
     assert not client.has_credential("cell-2")
     with pytest.raises(MissingCellCredentialError):
@@ -128,7 +129,7 @@ def make_client(tmp_path: Path, transport: httpx.AsyncBaseTransport | None = Non
             seed_cells={"cell-2": "http://cell-2"},
             default_cell_capacity=7,
         ),
-        http_client=httpx.AsyncClient(transport=transport),
+        http_client=async_client(transport=transport),
     )
     return TestClient(app, headers={INTERNAL_TOKEN_HEADER: ADMIN})
 

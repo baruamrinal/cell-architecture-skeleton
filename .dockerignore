@@ -5,3 +5,7 @@
 !src/
 **/__pycache__
 **/*.pyc
+!web-ui/
+web-ui/node_modules
+web-ui/dist
+web-ui/coverage

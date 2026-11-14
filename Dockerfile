@@ -9,6 +9,7 @@
 #   docker build --target order-processing -t cellarch/order-processing:dev .
 #   docker build --target dev-idp          -t cellarch/dev-idp:dev .   (development only)
 #   docker build --target mgr              -t cellarch/mgr:<version>-<commit> .
+#   docker build --target web-ui           -t cellarch/web-ui:<version>-<commit> .
 #
 # mgr is delivered on its own (docs/plan.md §2.4): its own version and tag, and its own
 # extra dependencies (the `mgr` extra), which no other image installs.
@@ -19,6 +20,9 @@
 # Base image pinned by digest (security guardrail, docs/plan.md §10). The digest is
 # the multi-arch index, so the same pin builds for amd64 and arm64 (Graviton).
 ARG PYTHON_IMAGE=python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
+# web-ui: built with Node and pnpm, served by unprivileged nginx (both pinned).
+ARG NODE_IMAGE=node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5
+ARG NGINX_IMAGE=nginxinc/nginx-unprivileged:1.27-alpine@sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0
 
 # --- dependencies (wheels), built once and cached ------------------------------------
 FROM ${PYTHON_IMAGE} AS build
@@ -89,3 +93,17 @@ RUN pip install --no-cache-dir $(ls /wheels/*.whl | grep -v '/cellarch-')  && rm
 USER 10001
 COPY src/cellarch/mgr /app/cellarch/mgr
 CMD ["uvicorn", "cellarch.mgr.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+
+# --- web-ui: static files, its own version and release --------------------------------
+FROM ${NODE_IMAGE} AS web-ui-build
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+WORKDIR /web-ui
+COPY web-ui/package.json web-ui/pnpm-lock.yaml ./
+RUN corepack enable && pnpm install --frozen-lockfile
+COPY web-ui/ ./
+RUN pnpm build
+
+FROM ${NGINX_IMAGE} AS web-ui
+COPY web-ui/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=web-ui-build /web-ui/dist /usr/share/nginx/html
+EXPOSE 8080

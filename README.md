@@ -31,7 +31,17 @@ Later stages are listed in [docs/plan.md §13](docs/plan.md).
 
 ## Quick start
 
-Requires **Docker**, **Python 3.12**, **[k3d](https://k3d.io)** and **[Helm](https://helm.sh)** (on Windows: `winget install k3d.k3d` and `winget install Helm.Helm`, then open a new terminal). Give Docker Desktop **8 GB or more** of memory; 10–12 GB is recommended. From the project folder:
+Requires **Docker**, **Python 3.12**, **[k3d](https://k3d.io)** and **[Helm](https://helm.sh)** (on Windows: `winget install k3d.k3d` and `winget install Helm.Helm`, then open a new terminal). Give Docker Desktop **8 GB or more** of memory; 10–12 GB is recommended.
+
+**For the web UI's front end** (`web-ui/`, only to work on it or run its tests; `make up` builds it inside Docker), also install **Node.js 24 LTS**, which includes Corepack: Corepack runs the exact pnpm version the project pins, so pnpm itself needs no install.
+```powershell
+winget install OpenJS.NodeJS.LTS    # then open a new terminal
+node --version                      # v24.x
+cd web-ui; corepack pnpm install    # the first run downloads the pinned pnpm (12.17.0)
+```
+On macOS/Linux, install Node 24 LTS from [nodejs.org](https://nodejs.org) or your package manager, then the same `corepack pnpm install`.
+
+From the project folder:
 
 ```powershell
 . .\make up                 # Windows (PowerShell). The leading dot keeps .venv activated afterwards.
@@ -51,18 +61,21 @@ The router and control plane reach each cell by name (`cell-1.cellarch.internal`
 1. creates `.venv` and installs the project if needed, then activates it;
 2. loads settings from `.env` if it exists;
 3. creates or starts the clusters: the platform plus each cell in `CELLS` (default `cell-1`) and any cell added with `cellctl cells deploy`;
-4. builds the five images and loads them into the clusters;
+4. builds the images (the services, `mgr` and `web-ui` with their own version tags) and loads them into the clusters;
 5. installs or upgrades the Helm charts and waits until everything is ready;
 6. shows `cellctl status`.
 
 | Command | What it does |
 |---|---|
 | `.\make up` | Set up, build and start everything (rebuilds after code changes) |
+| `.\make deploy-mgr` | Ship `mgr` alone: rebuild it and upgrade it in every running cell |
+| `.\make deploy-web-ui` | Ship the web UI alone: rebuild it and upgrade it in the platform cluster |
 | `.\make down` | Stop the clusters; data is kept |
 | `.\make clean` | **Delete** the clusters and all their data |
 | `.\make status` | Platform status (`cellctl status`) |
 | `.\make build` | Build the images only |
-| `.\make test` | Run the test suite with coverage |
+| `.\make test` | Run the whole test suite with coverage (CI runs this on every PR) |
+| `.\make test-fast` | Run the tests without the slow groups: Helm charts, Postgres and the front end |
 | `.\make setup` | Reinstall the project into `.venv` |
 
 **Settings:** copy [.env.example](.env.example) to `.env` to change tokens, seed cells (`CELLS`), limits and more. `.env` is git-ignored. Without it, development defaults are used.
@@ -81,7 +94,9 @@ curl -H "X-Tenant-ID: acme" -H "Content-Type: application/json" -d '{\"user_id\"
 ```
 `/v1/users` goes to the tenant's own `user-account` service and `/v1/orders` to its own `order-processing` service. Creates accept an `Idempotency-Key` header; lists return `{"items": [...], "next_cursor": ...}`.
 
-**The web UI's GraphQL API** (stage 4; the `web-ui` front end follows). Every tenant has its own address, `http://<tenant>.localhost:8080` (browsers send `*.localhost` to your machine). Sign in there with the development-only identity provider, then query `/graphql`:
+**The web UI** (stage 4): open **`http://<tenant>.localhost:8080`**, for example `http://acme.localhost:8080` after `cellctl tenants create acme`. Each tenant has its own address; sign in with the development-only button, then browse and manage that tenant's users and orders. To work on the front end with live reload, run `corepack pnpm dev` in `web-ui/` and open `http://acme.localhost:5173` (it forwards `/graphql` and `/auth` to the platform on :8080). Front-end checks: `corepack pnpm lint`, `corepack pnpm typecheck`, `corepack pnpm test` (with coverage); after changing a query or mgr's schema, `corepack pnpm codegen`.
+
+**The web UI's GraphQL API**, directly. Every tenant has its own address, `http://<tenant>.localhost:8080` (browsers send `*.localhost` to your machine). Sign in there with the development-only identity provider, then query `/graphql`:
 ```powershell
 # Sign in for acme (the dev identity provider sets the session cookie for acme.localhost)
 curl -c acme.cookies -X POST http://acme.localhost:8080/auth/dev/sign-in
@@ -402,6 +417,7 @@ Helm charts for the Kubernetes runtime (stage 2.6, one cluster per cell):
 | `charts/cell` | **each cell's own cluster** | the cell gateway and the cell's database server |
 | `charts/tenant-stack` | each cell's cluster, one release per tenant | the tenant's `user-account` and `order-processing` |
 | `charts/mgr` | **each cell's own cluster**, release `mgr` | the web UI's GraphQL backend, with its own autoscaler, disruption budget and network policy |
+| `charts/web-ui` | the platform cluster, release `web-ui` | the web UI's static files (nginx) and its runtime `config.json`; takes traffic only from the edge, makes no outbound calls |
 
 - **Hardened by default:** non-root, read-only filesystem, all capabilities dropped, probes and resource limits, tokens only from Kubernetes secrets.
 - **Network policies:** deny all ingress, then allow only what each component needs.
