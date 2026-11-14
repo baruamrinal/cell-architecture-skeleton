@@ -21,9 +21,24 @@ data:
       location /auth/ {
         proxy_pass {{ .Values.edge.identityProviderUrl }};
       }
+      {{- if .Values.edge.webUiUrl }}
+      location /graphql {
+        proxy_pass http://{{ $fullname }}-router:{{ .Values.router.service.port }};
+      }
+      location /v1/ {
+        proxy_pass http://{{ $fullname }}-router:{{ .Values.router.service.port }};
+      }
+      location /_router/ {
+        proxy_pass http://{{ $fullname }}-router:{{ .Values.router.service.port }};
+      }
+      location / {
+        proxy_pass {{ .Values.edge.webUiUrl }};
+      }
+      {{- else }}
       location / {
         proxy_pass http://{{ $fullname }}-router:{{ .Values.router.service.port }};
       }
+      {{- end }}
     }
 ---
 apiVersion: apps/v1

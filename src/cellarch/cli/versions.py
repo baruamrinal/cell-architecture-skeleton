@@ -12,6 +12,7 @@ Standard library only: ``make up`` imports it before the virtual environment exi
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -50,6 +51,14 @@ def source_version(init_file: Path) -> str:
     if not match:
         raise ValueError(f"no __version__ in {init_file}")
     return match.group(1)
+
+
+def package_version(package_json: Path) -> str:
+    """The ``version`` of a Node package (web-ui)."""
+    version = json.loads(package_json.read_text(encoding="utf-8")).get("version")
+    if not isinstance(version, str) or not version:
+        raise ValueError(f"no version in {package_json}")
+    return version
 
 
 def image_tag(version: str, git: Git, now: float) -> str:

@@ -2,7 +2,7 @@
 # Thin wrapper around scripts/dev.py, so both stay identical.
 
 PYTHON := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
-TARGETS := up deploy-mgr down clean status build test setup help
+TARGETS := up deploy-mgr deploy-web-ui down clean status build test test-fast setup help
 
 .PHONY: $(TARGETS)
 .DEFAULT_GOAL := help

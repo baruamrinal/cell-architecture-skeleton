@@ -20,6 +20,19 @@ import pytest
 from cellarch.common.sql import sqlite_url
 
 BACKENDS = ["sqlite", "postgres"]
+CHARTS_DIR = Path(__file__).resolve().parent / "charts"
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Mark the slow groups `make test-fast` skips: chart renders and real Postgres."""
+    for item in items:
+        if CHARTS_DIR in Path(str(item.path)).parents:
+            item.add_marker(pytest.mark.charts)
+        fixtures = getattr(item, "fixturenames", ())
+        callspec = getattr(item, "callspec", None)
+        backend = callspec.params.get("database_url") if callspec else None
+        if "postgres_url" in fixtures or backend == "postgres":
+            item.add_marker(pytest.mark.postgres)
 
 
 def _with_database(url: str, name: str) -> str:

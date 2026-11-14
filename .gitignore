@@ -225,3 +225,8 @@ tenant-data/
 
 # What this machine's clusters run (written by make up / make deploy-*).
 deploy/versions/local.yaml
+
+# web-ui (pnpm)
+web-ui/node_modules/
+web-ui/dist/
+web-ui/coverage/

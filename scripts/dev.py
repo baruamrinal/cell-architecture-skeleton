@@ -6,11 +6,13 @@ k3d cluster per cell, on a private Docker network (docs/plan.md §8.4-8.5).
     up      set up .venv, load .env, start the clusters, build and load the images,
             install the Helm charts, show status
     deploy-mgr  build mgr only and upgrade it in every running cell (independent delivery)
+    deploy-web-ui  build the web UI only and upgrade it in the platform cluster
     down    stop the clusters (data is kept)
     clean   delete the clusters and their data
     status  platform status (cellctl status)
     build   build the images only
     test    run the test suite with coverage
+    test-fast  run the tests without the slow groups (charts, Postgres, front end)
     setup   (re)install the project into .venv
 
 Standard library only, so it runs before the virtual environment exists.
@@ -43,6 +45,7 @@ from cellarch.cli.clusters import (  # noqa: E402
 from cellarch.cli.versions import (  # noqa: E402
     Git,
     image_tag,
+    package_version,
     read_versions,
     source_version,
     write_version,
@@ -69,12 +72,17 @@ PLATFORM_IMAGES = ["router", "control-plane"]
 DEV_IDP = "dev-idp"  # development-only identity provider (platform cluster)
 # mgr is delivered on its own: its own version and tag, its own release in each cell.
 MGR, MGR_VERSION_FILE = "mgr", Path("src") / "cellarch" / "mgr" / "__init__.py"
+# The web UI: static files, its own version and release in the platform cluster.
+WEB_UI, WEB_UI_PACKAGE = "web-ui", Path("web-ui") / "package.json"
+WEB_UI_URL = "http://web-ui:8080"
 TENANT_BASE_DOMAIN = "localhost"  # tenants' UI hosts: <tenant>.localhost:8080
 SESSION_ISSUER = "http://localhost:8080/auth"
 # Every cell runs its gateway and its tenants' services.
 CELL_IMAGES = ["cell-gateway", "user-account", "order-processing"]
 ROUTER_PORT, CONTROL_PLANE_PORT = 8080, 8000
 READY_TIMEOUT_SECONDS, READY_POLL_SECONDS = 120, 2
+# `make test-fast`: everything but the slow groups (CI always runs the full suite).
+FAST_TESTS = "not charts and not postgres and not frontend"
 
 Runner = Callable[[Sequence[str], Mapping[str, str]], int]
 
@@ -83,11 +91,13 @@ Usage: .\\make <target>   (macOS/Linux: make <target>)
 
   make up      set up .venv, start the k3d clusters, build the images, install the charts
   make deploy-mgr  build mgr only and upgrade it in every running cell
+  make deploy-web-ui  build the web UI only and upgrade it in the platform cluster
   make down    stop the clusters (data is kept)
   make clean   delete the clusters and all their data
   make status  show platform status
   make build   build the images only
-  make test    run the tests
+  make test    run the tests (all of them, with coverage; CI runs this too)
+  make test-fast  run the tests without the slow groups: charts, Postgres, front end
   make setup   reinstall the project into .venv
 
 Start with a dot on Windows to stay in the activated .venv:  . .\\make up
@@ -198,7 +208,11 @@ def platform_values(env: Mapping[str, str], seeds: Sequence[str]) -> dict[str, A
         },
         "controlPlane": control_plane,
         "router": router,
-        "edge": {"enabled": True, "service": {"type": "LoadBalancer", "port": ROUTER_PORT}},
+        "edge": {
+            "enabled": True,
+            "service": {"type": "LoadBalancer", "port": ROUTER_PORT},
+            "webUiUrl": WEB_UI_URL,
+        },
         "sessions": {"issuer": SESSION_ISSUER, "baseDomain": TENANT_BASE_DOMAIN},
         "redis": {"enabled": env.get("RATE_LIMIT_BACKEND") == "redis"},
     }
@@ -220,6 +234,37 @@ def install_mgr(clusters: ClusterToolkit, root: Path, cell: str, tag: str) -> No
     clusters.import_images(cell, [f"cellarch/{MGR}:{tag}"])
     values = {"cellId": cell, "image": {"tag": tag}}
     clusters.helm_upgrade(cell, MGR, root / "charts" / MGR, values)
+
+
+def web_ui_tag(root: Path, git: Git, now: float) -> str:
+    return image_tag(package_version(root / WEB_UI_PACKAGE), git, now)
+
+
+def build_web_ui(root: Path, run: Runner, env: Mapping[str, str], tag: str) -> int:
+    image = f"cellarch/{WEB_UI}:{tag}"
+    return run(["docker", "build", "--target", WEB_UI, "-t", image, str(root)], env)
+
+
+def install_web_ui(clusters: ClusterToolkit, root: Path, tag: str) -> None:
+    clusters.import_images(PLATFORM, [f"cellarch/{WEB_UI}:{tag}"])
+    clusters.helm_upgrade(PLATFORM, WEB_UI, root / "charts" / WEB_UI, {"image": {"tag": tag}})
+
+
+def deploy_web_ui(
+    root: Path, run: Runner, clusters: ClusterToolkit, env: Mapping[str, str], tag: str
+) -> int:
+    """Ship the web UI alone: build it, then upgrade only its release."""
+    if clusters.clusters().get(PLATFORM) != "running":
+        print("error: the platform cluster isn't running; start it with `make up`", file=sys.stderr)
+        return 1
+    print(f"Building the web UI {tag}...")
+    code = build_web_ui(root, run, env, tag)
+    if code:
+        return code
+    install_web_ui(clusters, root, tag)
+    write_version(root, WEB_UI, tag)
+    print(f"web-ui {tag} is running in the platform cluster.")
+    return 0
 
 
 def deploy_mgr(
@@ -259,6 +304,7 @@ def up(
     probe: Callable[[str], bool] = answers,
     sleep: Callable[[float], None] = time.sleep,
     tag: str = "",
+    ui_tag: str = "",
 ) -> int:
     seeds = seed_cells(env)
     existing = clusters.clusters()
@@ -280,7 +326,11 @@ def up(
         clusters.ensure_cluster(cell)
 
     print("Building the images...")
-    code = build_images(root, run, env) or build_mgr(root, run, env, tag)
+    code = (
+        build_images(root, run, env)
+        or build_mgr(root, run, env, tag)
+        or build_web_ui(root, run, env, ui_tag)
+    )
     if code:
         return code
 
@@ -303,6 +353,8 @@ def up(
     write_version(root, MGR, tag)
     clusters.set_cell_dns({cell: clusters.node_ip(cell) for cell in cells})
     clusters.helm_upgrade(PLATFORM, DEV_IDP, root / "charts" / DEV_IDP, dev_idp_values())
+    install_web_ui(clusters, root, ui_tag)  # before the edge starts sending / to it
+    write_version(root, WEB_UI, ui_tag)
     clusters.helm_upgrade(
         PLATFORM, RELEASE, root / "charts" / "platform", platform_values(env, seeds)
     )
@@ -347,7 +399,19 @@ def main(
     if target == "help":
         print(HELP)
         return 0
-    targets = ("up", "deploy-mgr", "down", "clean", "status", "build", "test", "setup", "token")
+    targets = (
+        "up",
+        "deploy-mgr",
+        "deploy-web-ui",
+        "down",
+        "clean",
+        "status",
+        "build",
+        "test",
+        "test-fast",
+        "setup",
+        "token",
+    )
     if target not in targets:
         print(f"error: unknown target {target!r}\n\n{HELP}", file=sys.stderr)
         return 2
@@ -363,9 +427,14 @@ def main(
         # in the caller's terminal. Not listed in the help.
         print(env["CELLCTL_TOKEN"])
         return 0
-    tag = mgr_tag(root, git or _git_runner(root), now())
+    git = git or _git_runner(root)
+    tag, ui_tag = mgr_tag(root, git, now()), web_ui_tag(root, git, now())
     if target == "build":
-        return build_images(root, run, env) or build_mgr(root, run, env, tag)
+        return (
+            build_images(root, run, env)
+            or build_mgr(root, run, env, tag)
+            or build_web_ui(root, run, env, ui_tag)
+        )
     if target == "setup":
         return ensure_venv(root, run, force=True)
 
@@ -389,10 +458,15 @@ def main(
             return code
         if target == "test":
             return run([str(venv_python(root)), "-m", "pytest", "--cov"], env)
+        if target == "test-fast":
+            fast = [str(venv_python(root)), "-m", "pytest", "-m", FAST_TESTS, "-p", "no:cacheprovider"]
+            return run(fast, env)
         if target == "up":
-            return up(root, run, k3d, env, port_in_use, answers, sleep, tag)
+            return up(root, run, k3d, env, port_in_use, answers, sleep, tag, ui_tag)
         if target == "deploy-mgr":
             return deploy_mgr(root, run, k3d, env, tag)
+        if target == "deploy-web-ui":
+            return deploy_web_ui(root, run, k3d, env, ui_tag)
         return run([str(venv_python(root)), "-m", "cellarch.cli.cellctl", "status"], env)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -129,6 +129,20 @@ def test_the_edge_serves_every_tenant_host_on_one_port() -> None:
     assert "proxy_set_header Host $host" in config  # the tenant comes from the host
 
 
+def test_with_the_web_ui_the_edge_sends_pages_to_it_and_api_paths_to_the_router() -> None:
+    objects = render("platform", {**REQUIRED, "edge": {"webUiUrl": "http://web-ui:8080"}})
+    config = find(objects, "ConfigMap", "edge")["data"]["default.conf"]
+    blocks = {
+        line.strip().split()[1]: next_line.strip()
+        for line, next_line in zip(config.splitlines(), config.splitlines()[1:], strict=False)
+        if line.strip().startswith("location ")
+    }
+    assert "http://web-ui:8080" in blocks["/"]
+    for api in ("/graphql", "/v1/", "/_router/"):
+        assert "-router:8000" in blocks[api], api
+    assert "http://dev-idp:8000" in blocks["/auth/"]
+
+
 def test_the_router_checks_web_ui_sessions() -> None:
     objects = render(
         "platform",

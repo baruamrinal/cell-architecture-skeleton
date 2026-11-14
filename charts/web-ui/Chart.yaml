@@ -1,0 +1,7 @@
+apiVersion: v2
+name: web-ui
+description: The tenant web UI's static files, a platform service released on its own (docs/plan.md §2.4)
+type: application
+# The image tag comes from the per-environment versions file (independent delivery).
+version: 0.1.0
+appVersion: "0.1.0"

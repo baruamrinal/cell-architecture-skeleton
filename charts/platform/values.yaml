@@ -52,12 +52,15 @@ sessions:
   baseDomain: localhost         # tenants' hosts: <tenant>.localhost (platform.com in prod)
 
 # LOCAL STAND-IN for the production ALB's path rules: one port for every tenant host.
-# /auth goes to the dev identity provider, everything else to the router (the web UI's
-# static files join in the web-ui chart). Off in production.
+# /auth goes to the dev identity provider, / to the web UI (when installed), the API to
+# the router. Off in production.
 edge:
   enabled: true
   image: nginxinc/nginx-unprivileged:1.27-alpine@sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0
   identityProviderUrl: http://dev-idp:8000
+  # The web UI's static files (charts/web-ui). When set, / goes there and only /graphql,
+  # /v1/ and /_router/ go to the router; when empty, everything but /auth goes to the router.
+  webUiUrl: ""
   service:
     type: LoadBalancer          # k3d maps it to localhost:8080
     port: 8080

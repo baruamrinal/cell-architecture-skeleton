@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Local development tasks:  .\make up | deploy-mgr | down | clean | status | build | test | setup | help
+    Local development tasks:  .\make up | deploy-mgr | deploy-web-ui | down | clean | status | build | test | test-fast | setup | help
 
 .DESCRIPTION
     Thin wrapper around scripts/dev.py (the same targets as the Makefile on macOS/Linux).
