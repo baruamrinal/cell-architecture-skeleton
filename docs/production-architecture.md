@@ -21,7 +21,7 @@ How the local skeleton becomes an enterprise production platform on AWS. The **d
 | Usage metering | In-memory counters, `cellctl usage` | **OpenTelemetry metrics → CloudWatch**, dashboards per cell and tenant | Counters built; export planned (6) |
 | Releases | `make up` rebuilds and re-installs the charts | **Argo CD ApplicationSets, cell by cell**: canary cell cluster, bake time, alarm checks, automatic rollback per wave. Kubernetes upgrades also roll out cell by cell | Planned (7) |
 | Images | Built locally / in CI | Built once in CI, **scanned (Trivy)** and **signed**, stored in **ECR**, base images pinned and kept current by Dependabot | Pinning + Dependabot built; signing planned (7) |
-| Tenant web UI | `web-ui` (nginx, static) and `mgr` (GraphQL) in the local platform cluster, behind one local port; dev sign-in with a signed cookie | The same containers in the platform EKS cluster behind the router's ALB (WAF) by path rules, no new load balancer; **Cognito** sign-in (tenant claim); at least 2 replicas across AZs; CloudFront in front of `web-ui` optional | Planned (4) |
+| Tenant web UI | `web-ui` (nginx, static) and `mgr` (GraphQL) in the local platform cluster, behind one local port; dev sign-in with a signed cookie | The same containers in the platform EKS cluster behind the router's ALB (WAF) by path rules, no new load balancer; **Cognito** sign-in (tenant claim); at least 2 replicas across AZs; CloudFront in front of `web-ui` optional; **each its own Argo CD Application and pipeline**, released independently of the platform and the cell waves | Planned (4) |
 | Customer-hosted cells | — | Cell in the customer's AWS account over **PrivateLink** | Planned (8) |
 
 ## 2. High availability
