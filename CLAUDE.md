@@ -6,7 +6,7 @@ Reference implementation of cell-based architecture for a multi-tenant SaaS plat
 
 ## Status
 
-Stages 1, 2, 2.5 and 2.6 implemented: core platform, traffic protection, per-tenant services (each tenant's own user-account + order-processing containers and database on its cell's Postgres), and the Kubernetes runtime (k3d locally: a platform cluster + one cluster per cell; Helm charts `platform`, `cell`, `tenant-stack`). Next: stage 3 (tenant moves). Work proceeds in the delivery stages in docs/plan.md §13, one stage at a time.
+Stages 1, 2, 2.5 and 2.6 implemented: core platform, traffic protection, per-tenant services (each tenant's own user-account + order-processing containers and database on its cell's Postgres), and the Kubernetes runtime (k3d locally: a platform cluster + one cluster per cell; Helm charts `platform`, `cell`, `tenant-stack`). Stage 3 in progress: the move procedure and audit log (3a) are built; promote/demote, drain and consolidate (3b) are next. Work proceeds in the delivery stages in docs/plan.md §13, one stage at a time.
 
 ## Working agreements
 

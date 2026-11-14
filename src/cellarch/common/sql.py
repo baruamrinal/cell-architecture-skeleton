@@ -14,11 +14,14 @@ Code written against it is portable:
   (a Postgres advisory lock; an immediate write lock on SQLite);
 * constraint violations raise ``IntegrityError``, every other driver failure
   ``DatabaseError``, so callers never import a driver;
-* DDL may use ``{seq_pk}``: an increasing key that is never reused.
+* DDL may use ``{seq_pk}``: an increasing key that is never reused;
+* copying data (tenant moves) uses ``tables``, ``insert_keeping_keys`` and
+  ``continue_sequence``, which hide the dialect differences.
 """
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Sequence
@@ -28,10 +31,19 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 import psycopg
+from psycopg import sql as pgsql
 from psycopg.rows import dict_row
 
 Row = dict[str, Any]
 SQLITE_PREFIX = "sqlite:///"
+_IDENTIFIER = re.compile(r"[a-z_][a-z0-9_]{0,62}")
+
+
+def identifier(name: str) -> str:
+    """``name`` if it is a plain lower-case SQL identifier; ``ValueError`` otherwise."""
+    if not _IDENTIFIER.fullmatch(name):
+        raise ValueError(f"not a plain SQL identifier: {name!r}")
+    return name
 
 
 class DatabaseError(Exception):
@@ -70,6 +82,23 @@ class Database(ABC):
         """Raises ``DatabaseError`` if the database can't answer a query."""
         with self.connect() as conn:
             conn.execute("SELECT 1")
+
+    @abstractmethod
+    def tables(self, conn: Connection) -> list[str]:
+        """The tables this connection works with (its schema on Postgres), sorted."""
+
+    def insert_keeping_keys(self, table: str, columns: Sequence[str]) -> str:
+        """An INSERT that stores the given values, sequence keys included."""
+        names = ", ".join(identifier(c) for c in columns)
+        marks = ", ".join("?" for _ in columns)
+        # Names are checked identifiers; values are bound parameters.
+        return f"INSERT INTO {identifier(table)} ({names}){self._keep_keys} VALUES ({marks})"  # noqa: S608
+
+    @abstractmethod
+    def continue_sequence(self, conn: Connection, table: str, column: str = "seq") -> None:
+        """Make new sequence keys of ``table`` follow the highest one stored."""
+
+    _keep_keys = ""
 
 
 # --- SQLite -----------------------------------------------------------------------------
@@ -113,6 +142,16 @@ class SqliteDatabase(Database):
 
     def __repr__(self) -> str:
         return f"SqliteDatabase({self.path!r})"
+
+    def tables(self, conn: Connection) -> list[str]:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite!_%' ESCAPE '!' ORDER BY name"
+        ).fetchall()
+        return [str(r["name"]) for r in rows]
+
+    def continue_sequence(self, conn: Connection, table: str, column: str = "seq") -> None:
+        identifier(table), identifier(column)  # AUTOINCREMENT already follows stored keys
 
     @contextmanager
     def connect(self, *, lock: str | None = None) -> Iterator[Connection]:
@@ -170,14 +209,43 @@ class _PostgresConnection:
 
 
 class PostgresDatabase(Database):
+    """A Postgres database; ``role`` / ``schema`` make an admin login act as one service.
+
+    With ``role`` set, every transaction runs with that role's rights only, inside
+    ``schema``: how the cell gateway copies a service's data without reaching further.
+    """
+
     dialect = "postgresql"
     _seq_pk = "BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY"
+    _keep_keys = " OVERRIDING SYSTEM VALUE"
 
     def __init__(
-        self, url: str, *, connect: Callable[[str], DriverConnection] = _psycopg_connect
+        self,
+        url: str,
+        *,
+        connect: Callable[[str], DriverConnection] = _psycopg_connect,
+        role: str | None = None,
+        schema: str | None = None,
     ) -> None:
         self._url = url
         self._connect = connect
+        self._role = role
+        self._schema = schema
+
+    def tables(self, conn: Connection) -> list[str]:
+        rows = conn.execute(
+            "SELECT table_name AS name FROM information_schema.tables "
+            "WHERE table_schema = current_schema() AND table_type = 'BASE TABLE' "
+            "ORDER BY table_name"
+        ).fetchall()
+        return [str(r["name"]) for r in rows]
+
+    def continue_sequence(self, conn: Connection, table: str, column: str = "seq") -> None:
+        conn.execute(
+            f"SELECT setval(pg_get_serial_sequence(?, ?), "  # noqa: S608 - checked identifiers
+            f"COALESCE((SELECT MAX({identifier(column)}) FROM {identifier(table)}), 0) + 1, false)",
+            (table, column),
+        )
 
     def __repr__(self) -> str:
         parts = urlsplit(self._url)
@@ -191,6 +259,8 @@ class PostgresDatabase(Database):
             raise DatabaseError("cannot connect to the database") from exc
         conn = _PostgresConnection(raw)
         try:
+            if self._role:
+                self._act_as(raw)
             if lock:  # held until this transaction ends
                 conn.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (lock,))
             yield conn
@@ -200,6 +270,16 @@ class PostgresDatabase(Database):
             raise
         finally:
             raw.close()
+
+    def _act_as(self, raw: DriverConnection) -> None:
+        try:
+            raw.execute(pgsql.SQL("SET LOCAL ROLE {}").format(pgsql.Identifier(str(self._role))))
+            if self._schema:
+                raw.execute(
+                    pgsql.SQL("SET LOCAL search_path TO {}").format(pgsql.Identifier(self._schema))
+                )
+        except psycopg.Error as exc:
+            raise DatabaseError(type(exc).__name__) from exc
 
 
 # --- configuration ----------------------------------------------------------------------

@@ -17,6 +17,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from cellarch.data_plane.cell.tenant_resources import (
     SERVICES,
     STACK_TOKEN_KEY,
+    TenantResourceError,
     database_url_key,
 )
 from cellarch.services.common.settings import ServiceSettings
@@ -28,16 +29,17 @@ from cellarch.services.user_account.app import create_app as create_user_account
 class MemorySecrets:
     def __init__(self) -> None:
         self.values: dict[str, dict[str, str]] = {}
-        self.fail = False
+        self.fail = False  # writes fail
+        self.fail_delete = False
 
     def put(self, tenant_id: str, values: dict[str, str]) -> None:
         if self.fail:
-            from cellarch.data_plane.cell.tenant_resources import TenantResourceError
-
             raise TenantResourceError("secret store unavailable")
         self.values[tenant_id] = dict(values)
 
     def delete(self, tenant_id: str) -> None:
+        if self.fail_delete:
+            raise TenantResourceError("secret store unavailable")
         self.values.pop(tenant_id, None)
 
 

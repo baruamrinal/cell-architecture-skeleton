@@ -1,8 +1,10 @@
 """Control plane API: cell registry, tenant onboarding and placement, routing lookups.
 
 Two APIs with separate credentials (docs/plan.md §2.3):
-  * admin API (/v1/cells, /v1/tenants)  - admin credential only
-  * routing API (/v1/routing/*)         - router credential (read-only) or admin
+  * admin API (/v1/cells, /v1/tenants, /v1/moves, /v1/audit) - admin credential only
+  * routing API (/v1/routing/*)          - router credential (read-only) or admin
+
+Every admin change is written to the audit log (audit.py); tenant moves are in moves.py.
 """
 
 import logging
@@ -36,8 +38,10 @@ from cellarch.common.errors import ApiError, install_error_handlers
 from cellarch.common.headers import ACTOR_HEADER
 from cellarch.common.logging import configure_logging
 from cellarch.common.security import TokenAuth
+from cellarch.control_plane.audit import AuditLog
 from cellarch.control_plane.cell_client import CellClient, CellVerificationError
 from cellarch.control_plane.credentials import LocalCredentialStore
+from cellarch.control_plane.moves import MoveProcedure, moves_router
 from cellarch.control_plane.placement import (
     CellCandidate,
     FillFirstPlacement,
@@ -152,6 +156,7 @@ class Cell(BaseModel):
     capacity: int
     wave: int
     tenant_count: int
+    incoming_tenants: int  # moves heading here that haven't switched yet
     utilization: float
     created_at: str
     created_by: str
@@ -236,6 +241,7 @@ def create_app(
     cells = CellClient(http, credentials)
     strategy = placement or FillFirstPlacement(settings.target_utilization)
     auth = TokenAuth({ADMIN_ROLE: settings.admin_token, ROUTER_ROLE: settings.router_token})
+    audit = AuditLog(store)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -279,6 +285,12 @@ def create_app(
     async def register_cell(
         body: CellRegistration, actor: Annotated[str, Depends(current_actor)]
     ) -> Cell:
+        with audit.record(
+            "cell.register", actor, cell_id=body.cell_id, url=body.url, type=body.type
+        ):
+            return await _register_cell(body, actor)
+
+    async def _register_cell(body: CellRegistration, actor: str) -> Cell:
         if store.get_cell(body.cell_id) is not None:
             raise ApiError(409, "cell_exists", f"cell {body.cell_id} already exists")
         credential = body.credential or credentials.get(body.cell_id)
@@ -323,42 +335,50 @@ def create_app(
     def update_cell(
         cell_id: str, body: CellUpdate, actor: Annotated[str, Depends(current_actor)]
     ) -> Cell:
-        cell = require_cell(cell_id)
-        tenants = int(str(cell["tenant_count"]))
-        if body.capacity is not None and body.capacity < tenants:
-            raise ApiError(
-                409,
-                "capacity_below_tenants",
-                f"{cell_id} hosts {tenants} tenants; capacity can't be lower than that",
+        changes = body.model_dump(exclude_none=True)
+        with audit.record("cell.update", actor, cell_id=cell_id, **changes):
+            cell = require_cell(cell_id)
+            tenants = int(str(cell["tenant_count"])) + int(str(cell["incoming_tenants"]))
+            if body.capacity is not None and body.capacity < tenants:
+                raise ApiError(
+                    409,
+                    "capacity_below_tenants",
+                    f"{cell_id} hosts or is receiving {tenants} tenants; "
+                    "capacity can't be lower than that",
+                )
+            row = store.update_cell(
+                cell_id, status=body.status, capacity=body.capacity, actor=actor
             )
-        row = store.update_cell(cell_id, status=body.status, capacity=body.capacity, actor=actor)
         return _cell(row or require_cell(cell_id))
 
     @admin.delete("/cells/{cell_id}", status_code=204)
-    def decommission_cell(cell_id: str) -> Response:
-        cell = require_cell(cell_id)
-        tenants = int(str(cell["tenant_count"]))
-        if tenants:
-            raise ApiError(
-                409,
-                "cell_not_empty",
-                f"{cell_id} still hosts {tenants} tenants; move them off first",
-            )
-        store.delete_cell(cell_id)
-        credentials.delete(cell_id)
+    def decommission_cell(cell_id: str, actor: Annotated[str, Depends(current_actor)]) -> Response:
+        with audit.record("cell.decommission", actor, cell_id=cell_id):
+            cell = require_cell(cell_id)
+            tenants = int(str(cell["tenant_count"])) + int(str(cell["incoming_tenants"]))
+            if tenants:
+                raise ApiError(
+                    409,
+                    "cell_not_empty",
+                    f"{cell_id} still hosts or is receiving {tenants} tenants; move them off first",
+                )
+            store.delete_cell(cell_id)
+            credentials.delete(cell_id)
         log.info("cell %s decommissioned", cell_id)
         return Response(status_code=204)
 
-    def candidates() -> list[CellCandidate]:
+    def candidates(exclude: str | None = None) -> list[CellCandidate]:
+        # Tenants moving in hold a slot already.
         return [
             CellCandidate(
                 cell_id=str(c["cell_id"]),
                 type=str(c["type"]),
                 status=str(c["status"]),
                 capacity=int(c["capacity"]),
-                tenant_count=int(c["tenant_count"]),
+                tenant_count=int(c["tenant_count"]) + int(c["incoming_tenants"]),
             )
             for c in store.list_cells()
+            if c["cell_id"] != exclude
         ]
 
     @admin.get("/status")
@@ -425,6 +445,12 @@ def create_app(
         body: TenantCreate, actor: Annotated[str, Depends(current_actor)]
     ) -> Tenant:
         tenant_id = body.tenant_id or f"t-{uuid.uuid4().hex[:12]}"
+        with audit.record("tenant.create", actor, tenant_id=tenant_id, tier=body.tier) as event:
+            tenant = await _create_tenant(tenant_id, body, actor)
+            event.cell_id = tenant.cell_id
+        return tenant
+
+    async def _create_tenant(tenant_id: str, body: TenantCreate, actor: str) -> Tenant:
         if store.get_tenant(tenant_id) is not None:
             raise ApiError(409, "tenant_exists", f"tenant {tenant_id} already exists")
 
@@ -467,7 +493,15 @@ def create_app(
         tenant_id: TenantId, actor: Annotated[str, Depends(current_actor)]
     ) -> Tenant:
         """Last onboarding step: the cell confirms the tenant's stack is ready."""
+        with audit.record("tenant.activate", actor, tenant_id=tenant_id) as event:
+            tenant = await _activate_tenant(tenant_id, actor)
+            event.cell_id = tenant.cell_id
+        return tenant
+
+    async def _activate_tenant(tenant_id: str, actor: str) -> Tenant:
         tenant = require_tenant(tenant_id)
+        if tenant["status"] == "migrating":
+            raise ApiError(409, "move_in_progress", f"tenant {tenant_id} is being moved")
         if tenant["status"] != "active":
             cell_id, url = str(tenant["cell_id"]), str(require_cell(str(tenant["cell_id"]))["url"])
             try:
@@ -485,15 +519,20 @@ def create_app(
         return tenant_out(require_tenant(tenant_id))
 
     @admin.delete("/tenants/{tenant_id}", status_code=204)
-    async def delete_tenant(tenant_id: TenantId) -> Response:
+    async def delete_tenant(
+        tenant_id: TenantId, actor: Annotated[str, Depends(current_actor)]
+    ) -> Response:
         """Remove the tenant: its cell drops its database, logins and secret first."""
-        tenant = require_tenant(tenant_id)
-        cell_id, url = str(tenant["cell_id"]), str(require_cell(str(tenant["cell_id"]))["url"])
-        try:
-            await cells.delete_tenant(cell_id, url, tenant_id)
-        except Exception as exc:
-            raise _cell_unavailable(cell_id, exc) from exc
-        store.delete_tenant(tenant_id)
+        with audit.record("tenant.delete", actor, tenant_id=tenant_id) as event:
+            tenant = require_tenant(tenant_id)
+            if store.unfinished_move(tenant_id) is not None:
+                raise ApiError(409, "move_in_progress", f"tenant {tenant_id} is being moved")
+            cell_id = event.cell_id = str(tenant["cell_id"])
+            try:
+                await cells.delete_tenant(cell_id, str(require_cell(cell_id)["url"]), tenant_id)
+            except Exception as exc:
+                raise _cell_unavailable(cell_id, exc) from exc
+            store.delete_tenant(tenant_id)
         log.info("tenant %s deleted from %s", tenant_id, cell_id)
         return Response(status_code=204)
 
@@ -509,8 +548,11 @@ def create_app(
     def set_tenant_rate_limit(
         tenant_id: TenantId, body: RateLimit, actor: Annotated[str, Depends(current_actor)]
     ) -> Tenant:
-        require_tenant(tenant_id)
-        store.set_rate_limit(tenant_id, body.rps, body.burst, actor)
+        with audit.record(
+            "tenant.rate_limit.set", actor, tenant_id=tenant_id, rps=body.rps, burst=body.burst
+        ):
+            require_tenant(tenant_id)
+            store.set_rate_limit(tenant_id, body.rps, body.burst, actor)
         log.info("rate limit of %s set to %s/s burst %s", tenant_id, body.rps, body.burst)
         return tenant_out(require_tenant(tenant_id))
 
@@ -518,8 +560,9 @@ def create_app(
     def clear_tenant_rate_limit(
         tenant_id: TenantId, actor: Annotated[str, Depends(current_actor)]
     ) -> Tenant:
-        require_tenant(tenant_id)
-        store.set_rate_limit(tenant_id, None, None, actor)
+        with audit.record("tenant.rate_limit.clear", actor, tenant_id=tenant_id):
+            require_tenant(tenant_id)
+            store.set_rate_limit(tenant_id, None, None, actor)
         log.info("rate limit override of %s cleared", tenant_id)
         return tenant_out(require_tenant(tenant_id))
 
@@ -535,6 +578,15 @@ def create_app(
         limit, _ = effective_limit(entry)
         return RoutingEntry.model_validate({**entry, "rate_limit": limit.model_dump()})
 
+    # --- admin API: moves and audit log --------------------------------------------------
+
+    def choose_target(source: str) -> str:
+        return strategy.choose(candidates(exclude=source)).cell_id
+
+    procedure = MoveProcedure(store, cells, choose_target)
+
     app.include_router(admin)
+    app.include_router(moves_router(procedure, store, audit, current_actor))
+    app.include_router(audit.router(dependencies=[Depends(current_actor)]))
     app.include_router(routing)
     return app

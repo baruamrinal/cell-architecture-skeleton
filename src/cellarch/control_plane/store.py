@@ -1,5 +1,6 @@
-"""Control plane registry: cells, tenants and tenant -> cell assignment."""
+"""Control plane registry: cells, tenants, tenant -> cell assignment, moves, audit log."""
 
+import json
 import sqlite3
 from typing import Any
 
@@ -41,6 +42,36 @@ CREATE TABLE IF NOT EXISTS retired_cells (
     cell_id    TEXT PRIMARY KEY,
     retired_at TEXT NOT NULL
 );
+-- Tenant moves (docs/plan.md §5). Kept after the tenant is gone, as history.
+CREATE TABLE IF NOT EXISTS moves (
+    move_id         TEXT PRIMARY KEY,
+    tenant_id       TEXT NOT NULL,
+    source_cell_id  TEXT NOT NULL,
+    target_cell_id  TEXT NOT NULL,
+    state           TEXT NOT NULL,
+    cleanup_pending TEXT,            -- cell still holding a copy to delete
+    error           TEXT,            -- why it was rolled back
+    copied_rows     INTEGER,
+    created_at      TEXT NOT NULL,
+    created_by      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    updated_by      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_moves_tenant ON moves (tenant_id);
+-- Every admin change, including refused and failed ones.
+CREATE TABLE IF NOT EXISTS audit_events (
+    event_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    at             TEXT NOT NULL,
+    actor          TEXT NOT NULL,
+    action         TEXT NOT NULL,
+    outcome        TEXT NOT NULL,
+    error          TEXT,
+    tenant_id      TEXT,
+    cell_id        TEXT,
+    target_cell_id TEXT,
+    detail         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_audit_tenant ON audit_events (tenant_id, event_id);
 """
 
 # Columns added after the first release: (table, column, definition). Databases created
@@ -55,8 +86,14 @@ _ADDED_COLUMNS = [
     ("tenants", "rate_limit_burst", "INTEGER"),
 ]
 
+# Moves that block another move of the same tenant.
+UNFINISHED = ("started", "copied", "switched")
+
+# incoming_tenants: moves heading to the cell that haven't switched yet (they hold a slot).
 _CELLS_WITH_LOAD = """
-SELECT c.*, COUNT(t.tenant_id) AS tenant_count
+SELECT c.*, COUNT(t.tenant_id) AS tenant_count,
+       (SELECT COUNT(*) FROM moves m WHERE m.target_cell_id = c.cell_id
+        AND m.state IN ('started', 'copied')) AS incoming_tenants
 FROM cells c LEFT JOIN tenants t ON t.cell_id = c.cell_id
 """
 
@@ -235,6 +272,139 @@ class ControlPlaneStore:
                 "WHERE tenant_id = ?",
                 (value, utcnow(), actor, tenant_id),
             )
+
+    # --- moves ---------------------------------------------------------------------------
+
+    def add_move(
+        self, move_id: str, tenant_id: str, source: str, target: str, actor: str
+    ) -> dict[str, Any]:
+        """Record a new move and mark the tenant ``migrating``, in one transaction."""
+        now = utcnow()
+        with connect(self._db_path) as conn:
+            conn.execute(
+                "INSERT INTO moves (move_id, tenant_id, source_cell_id, target_cell_id, state, "
+                "created_at, created_by, updated_at, updated_by) "
+                "VALUES (?, ?, ?, ?, 'started', ?, ?, ?, ?)",
+                (move_id, tenant_id, source, target, now, actor, now, actor),
+            )
+            conn.execute(
+                "UPDATE tenants SET status = 'migrating', updated_at = ?, updated_by = ? "
+                "WHERE tenant_id = ?",
+                (now, actor, tenant_id),
+            )
+        return self._require_move(move_id)
+
+    def get_move(self, move_id: str) -> dict[str, Any] | None:
+        with connect(self._db_path) as conn:
+            row = conn.execute("SELECT * FROM moves WHERE move_id = ?", (move_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_moves(self, tenant_id: str | None = None) -> list[dict[str, Any]]:
+        """Newest first."""
+        where, params = ("WHERE tenant_id = ?", (tenant_id,)) if tenant_id else ("", ())
+        with connect(self._db_path) as conn:
+            rows = conn.execute(
+                f"SELECT * FROM moves {where} ORDER BY created_at DESC, move_id",  # noqa: S608
+                params,
+            )
+            return [dict(r) for r in rows.fetchall()]
+
+    def unfinished_move(self, tenant_id: str) -> dict[str, Any] | None:
+        with connect(self._db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM moves WHERE tenant_id = ? AND state IN (?, ?, ?)",
+                (tenant_id, *UNFINISHED),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def update_move(self, move_id: str, actor: str, **fields: Any) -> dict[str, Any]:
+        assert set(fields) <= {"state", "cleanup_pending", "error", "copied_rows"}  # noqa: S101
+        assignments = "".join(f"{name} = ?, " for name in fields)
+        with connect(self._db_path) as conn:
+            conn.execute(
+                f"UPDATE moves SET {assignments}updated_at = ?, updated_by = ? "  # noqa: S608
+                "WHERE move_id = ?",
+                (*fields.values(), utcnow(), actor, move_id),
+            )
+        return self._require_move(move_id)
+
+    def end_move(
+        self, move: dict[str, Any], actor: str, *, state: str, cell_id: str, **fields: Any
+    ) -> dict[str, Any]:
+        """Switch or roll back: the tenant is ``active`` on ``cell_id`` again."""
+        now = utcnow()
+        with connect(self._db_path) as conn:
+            conn.execute(
+                "UPDATE tenants SET cell_id = ?, status = 'active', updated_at = ?, "
+                "updated_by = ? WHERE tenant_id = ?",
+                (cell_id, now, actor, move["tenant_id"]),
+            )
+        return self.update_move(str(move["move_id"]), actor, state=state, **fields)
+
+    def _require_move(self, move_id: str) -> dict[str, Any]:
+        move = self.get_move(move_id)
+        if move is None:  # pragma: no cover - only called right after a write
+            raise KeyError(move_id)
+        return move
+
+    # --- audit log -----------------------------------------------------------------------
+
+    def add_event(
+        self,
+        *,
+        actor: str,
+        action: str,
+        outcome: str,
+        error: str | None = None,
+        tenant_id: str | None = None,
+        cell_id: str | None = None,
+        target_cell_id: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        with connect(self._db_path) as conn:
+            conn.execute(
+                "INSERT INTO audit_events (at, actor, action, outcome, error, tenant_id, "
+                "cell_id, target_cell_id, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    utcnow(),
+                    actor,
+                    action,
+                    outcome,
+                    error,
+                    tenant_id,
+                    cell_id,
+                    target_cell_id,
+                    json.dumps(detail or {}, sort_keys=True),
+                ),
+            )
+
+    def list_events(
+        self,
+        *,
+        limit: int,
+        before: int | None = None,
+        tenant_id: str | None = None,
+        cell_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Newest first; ``before`` (an event id) is where the previous page ended."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if before is not None:
+            clauses.append("event_id < ?")
+            params.append(before)
+        if tenant_id is not None:
+            clauses.append("tenant_id = ?")
+            params.append(tenant_id)
+        if cell_id is not None:
+            clauses.append("(cell_id = ? OR target_cell_id = ?)")
+            params.extend([cell_id, cell_id])
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with connect(self._db_path) as conn:
+            rows = conn.execute(
+                f"SELECT * FROM audit_events {where} ORDER BY event_id DESC LIMIT ?",  # noqa: S608
+                (*params, limit),
+            ).fetchall()
+        return [{**dict(r), "detail": json.loads(r["detail"])} for r in rows]
 
     # --- routing -------------------------------------------------------------------------
 

@@ -22,11 +22,11 @@ from cellarch.common.config import require_env
 from cellarch.common.db import utcnow
 from cellarch.common.errors import ApiError
 from cellarch.common.headers import INTERNAL_TOKEN_HEADER, TENANT_HEADER
+from cellarch.common.pagination import DEFAULT_LIMIT, MAX_LIMIT, after_seq, page
 from cellarch.common.sql import Row, open_database
 from cellarch.services.common.app import create_service_app, tenant_api
 from cellarch.services.common.idempotency import IDEMPOTENCY_HEADER, IdempotencyStore, idempotent
 from cellarch.services.common.migrations import Migration, apply_migrations
-from cellarch.services.common.pagination import DEFAULT_LIMIT, MAX_LIMIT, after_seq, page
 from cellarch.services.common.settings import ServiceSettings
 
 SERVICE = "order-processing"

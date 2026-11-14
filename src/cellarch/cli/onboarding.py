@@ -49,7 +49,7 @@ def tenant_release(tenant_id: str) -> str:
     return f"tenant-{tenant_id}"
 
 
-def _require_local_cell(clusters: StackClusters, cell_id: str) -> None:
+def require_local_cell(clusters: StackClusters, cell_id: str) -> None:
     if cell_id not in clusters.cell_ids():
         raise CommandError(
             "cell_not_local",
@@ -73,7 +73,7 @@ def onboard(
     progress(f"Tenant {tenant_id} placed on {cell_id}; its database is ready.")
     installed = False
     try:
-        _require_local_cell(clusters, cell_id)
+        require_local_cell(clusters, cell_id)
         progress(f"Starting {tenant_id}'s services in {cell_id}'s cluster...")
         installed = True
         clusters.helm_upgrade(
@@ -107,7 +107,7 @@ def offboard(api: AdminApi, clusters: StackClusters, tenant_id: str, *, progress
     """Stop the tenant's stack, then delete the tenant and its database."""
     tenant = api.call("GET", f"/v1/tenants/{tenant_id}")
     cell_id = tenant["cell_id"]
-    _require_local_cell(clusters, cell_id)
+    require_local_cell(clusters, cell_id)
     progress(f"Stopping {tenant_id}'s services in {cell_id}'s cluster...")
     clusters.helm_uninstall(cell_id, tenant_release(tenant_id))
     api.call("DELETE", f"/v1/tenants/{tenant_id}")

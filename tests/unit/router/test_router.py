@@ -231,6 +231,19 @@ class TestRouterApp:
         assert (response.status_code, response.json()["error"]) == (503, "tenant_unavailable")
         assert response.headers["retry-after"]
 
+    def test_a_migrating_tenant_can_read_but_not_write(self) -> None:
+        cp = lambda r: httpx.Response(200, json=entry(status="migrating").model_dump())  # noqa: E731
+        client = router_client(cp, lambda r: httpx.Response(200, json={"items": []}))
+        for method in ("GET", "HEAD"):
+            assert (
+                client.request(method, "/v1/users", headers={TENANT_HEADER: "acme"}).status_code
+                == 200
+            )
+        for method in ("POST", "PUT", "PATCH", "DELETE"):
+            response = client.request(method, "/v1/users", headers={TENANT_HEADER: "acme"})
+            assert (response.status_code, response.json()["error"]) == (503, "tenant_migrating")
+            assert response.headers["retry-after"]
+
     def test_misdirected_twice_to_same_cell_is_stale_routing(self) -> None:
         cell = lambda r: httpx.Response(421, json={"error": "tenant_not_in_cell"})  # noqa: E731
         response = router_client(ok(), cell).get("/v1/items", headers={TENANT_HEADER: "acme"})

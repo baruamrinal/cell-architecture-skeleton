@@ -12,6 +12,13 @@ Tenant lifecycle
     cellctl tenants create acme --name "Acme" --tier premium   place it, start its services
     cellctl tenants delete acme                                 stop its services, delete its data
     cellctl tenants list | get acme
+    cellctl tenants move acme --to cell-2                       move it to another cell
+
+Moves and audit log
+    cellctl moves list [--tenant acme] | show <move>
+    cellctl moves rollback <move>       roll back a move that stopped before its switch
+    cellctl moves complete <move>       retry the clean-up of the old cell
+    cellctl audit [--tenant acme] [--cell cell-2] [--limit 20] [--cursor <c>]
 
 Overview
     cellctl status
@@ -33,6 +40,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -44,6 +52,7 @@ from cellarch.cli.clusters import (
     cell_url,
     cluster_name,
 )
+from cellarch.cli.moves import move, rollback
 from cellarch.cli.onboarding import offboard, onboard
 from cellarch.common.contracts import is_valid_tenant_id
 from cellarch.common.dotenv import load_env_file
@@ -176,6 +185,12 @@ def _parser(settings: Mapping[str, str]) -> argparse.ArgumentParser:
     )
     delete = tenants.add_parser("delete", help="stop a tenant's services and delete its data")
     delete.add_argument("tenant_id")
+    move_tenant = tenants.add_parser("move", help="move a tenant and its data to another cell")
+    move_tenant.add_argument("tenant_id")
+    move_tenant.add_argument("--to", dest="target", help="target cell (default: placement chooses)")
+    move_tenant.add_argument(
+        "--charts-dir", default=settings.get("CELLCTL_CHARTS_DIR", DEFAULT_CHARTS_DIR)
+    )
 
     set_limit = tenants.add_parser(
         "set-limit", help="override a tenant's rate limit, or --clear to use its tier default"
@@ -184,6 +199,20 @@ def _parser(settings: Mapping[str, str]) -> argparse.ArgumentParser:
     set_limit.add_argument("--rps", type=_positive_float, help="requests per second")
     set_limit.add_argument("--burst", type=_positive_int, help="requests allowed at once")
     set_limit.add_argument("--clear", action="store_true", help="remove the override")
+
+    moves = resources.add_parser("moves", help="tenant moves").add_subparsers(
+        dest="action", required=True
+    )
+    moves.add_parser("list", help="list moves, newest first").add_argument("--tenant")
+    moves.add_parser("show", help="show one move").add_argument("move_id")
+    moves.add_parser("rollback", help="roll back a move before its switch").add_argument("move_id")
+    moves.add_parser("complete", help="retry removing the old cell's copy").add_argument("move_id")
+
+    audit = resources.add_parser("audit", help="who changed what, newest first")
+    audit.add_argument("--tenant")
+    audit.add_argument("--cell")
+    audit.add_argument("--limit", type=_positive_int, default=20)
+    audit.add_argument("--cursor", help="continue where the previous page ended")
 
     resources.add_parser("status", help="platform capacity overview and warnings")
     resources.add_parser("usage", help="per-tenant request usage, from the router")
@@ -232,6 +261,17 @@ def _request(args: argparse.Namespace) -> tuple[str, str, dict[str, Any] | None]
             return "GET", "/v1/tenants", None
         case ("tenants", "get"):
             return "GET", f"/v1/tenants/{args.tenant_id}", None
+        case ("moves", "list"):
+            query = f"?{urlencode({'tenant_id': args.tenant})}" if args.tenant else ""
+            return "GET", f"/v1/moves{query}", None
+        case ("moves", "show"):
+            return "GET", f"/v1/moves/{args.move_id}", None
+        case ("moves", "complete"):
+            return "POST", f"/v1/moves/{args.move_id}/complete", None
+        case ("audit", _):
+            params = {"tenant_id": args.tenant, "cell_id": args.cell, "cursor": args.cursor}
+            filters: dict[str, Any] = {k: v for k, v in params.items() if v}
+            return "GET", f"/v1/audit?{urlencode({**filters, 'limit': args.limit})}", None
         case ("tenants", "set-limit"):
             path = f"/v1/tenants/{args.tenant_id}/rate-limit"
             if args.clear:
@@ -393,9 +433,61 @@ def _status(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _moves_table(moves: list[dict[str, Any]]) -> str:
+    if not moves:
+        return "No moves."
+    header = ["MOVE", "TENANT", "FROM", "TO", "STATE", "CLEANUP", "UPDATED"]
+    rows = [
+        [
+            m["move_id"],
+            m["tenant_id"],
+            m["source_cell_id"],
+            m["target_cell_id"],
+            m["state"],
+            m["cleanup_pending"] or "-",
+            m["updated_at"],
+        ]
+        for m in moves
+    ]
+    return _table([header, *rows])
+
+
+def _audit_table(args: argparse.Namespace, page: dict[str, Any]) -> str:
+    if not page["items"]:
+        return "No audit events."
+    header = ["TIME", "ACTOR", "ACTION", "OUTCOME", "TENANT", "CELL", "ERROR"]
+    rows = []
+    for e in page["items"]:
+        cell = e["cell_id"] or "-"
+        if e["target_cell_id"] and e["target_cell_id"] != e["cell_id"]:
+            cell = f"{cell}->{e['target_cell_id']}"
+        rows.append(
+            [
+                e["at"],
+                e["actor"],
+                e["action"],
+                e["outcome"],
+                e["tenant_id"] or "-",
+                cell,
+                e["error"] or "-",
+            ]
+        )
+    lines = [_table([header, *rows])]
+    if page["next_cursor"]:
+        more = f"More: cellctl audit --cursor {page['next_cursor']} --limit {args.limit}"
+        more += f" --tenant {args.tenant}" if args.tenant else ""
+        more += f" --cell {args.cell}" if args.cell else ""
+        lines.append(more)
+    return "\n".join(lines)
+
+
 def _render(args: argparse.Namespace, data: Any) -> str:
     if args.resource == "status":
         return _status(data)
+    if args.resource == "audit":
+        return _audit_table(args, data)
+    if (args.resource, args.action) == ("moves", "list"):
+        return _moves_table(data["items"])
     if not isinstance(data, list):
         return json.dumps(data, indent=2)
     if args.resource == "cells":
@@ -500,6 +592,18 @@ def main(
         elif action == ("tenants", "delete"):
             offboard(api, clusters or LocalClusters(), args.tenant_id, progress=_progress)
             return EXIT_OK
+        elif action == ("tenants", "move"):
+            data = move(
+                api,
+                clusters or LocalClusters(),
+                Path(args.charts_dir),
+                args.tenant_id,
+                args.target,
+                progress=_progress,
+                sleep=sleep,
+            )
+        elif action == ("moves", "rollback"):
+            data = rollback(api, clusters or LocalClusters(), args.move_id, progress=_progress)
         else:
             data = api.call(*_request(args))
     except UsageError as exc:

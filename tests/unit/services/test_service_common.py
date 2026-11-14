@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from cellarch.common.pagination import decode_cursor, encode_cursor
 from cellarch.common.sql import DatabaseError, SqliteDatabase, open_database
 from cellarch.services.common.idempotency import (
     IdempotencyConflictError,
@@ -11,7 +12,6 @@ from cellarch.services.common.idempotency import (
     request_fingerprint,
 )
 from cellarch.services.common.migrations import Migration, apply_migrations
-from cellarch.services.common.pagination import decode_cursor, encode_cursor
 from cellarch.services.common.settings import ServiceSettings
 
 

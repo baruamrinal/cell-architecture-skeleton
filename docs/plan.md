@@ -215,6 +215,30 @@ On failure at any step: roll back (unfreeze the source, remove partial target da
 
 Stale router caches are safe: the source returns `421` after deletion, so the router refreshes the route and retries.
 
+**How it runs.** A move is a record in the control plane that moves through fixed states. Like onboarding (§3.4), `cellctl` drives it (`cellctl tenants move acme --to cell-2`), because only the operator's tool installs Helm releases:
+
+| Step | Call | State after |
+|---|---|---|
+| Start: check the target (active, another cell, has room counting moves already heading there), set the tenant `migrating`, freeze it on the source, create its database and secret on the target | `POST /v1/tenants/{id}/moves` | `started` |
+| Install the tenant's stack in the target cell's cluster; its services create their tables | `cellctl` (Helm) | `started` |
+| Copy: export from the source, import into the target, compare row counts (`409 tenant_stack_not_ready` until the target stack has created its tables; `cellctl` retries) | `POST /v1/moves/{id}/copy` | `copied` |
+| Switch: the target checks the stack is ready, the route points to the target, the tenant is `active` | `POST /v1/moves/{id}/switch` | `switched` |
+| Uninstall the stack on the source | `cellctl` (Helm) | `switched` |
+| Complete: the source drops the tenant's database, logins and secret. If that fails the move still completes, with `cleanup_pending` set | `POST /v1/moves/{id}/complete` | `completed` |
+| Roll back (any time before the switch): `cellctl` uninstalls the target stack, then the target's data is dropped, the source is unfrozen and the tenant is `active` again | `POST /v1/moves/{id}/rollback` | `rolled_back` |
+
+- **One move per tenant at a time**, and only for `active` tenants.
+- **Writes pause in two places:** the router answers writes for a `migrating` tenant with `503 tenant_migrating` (+ `Retry-After`) and forwards reads; the frozen source gateway does the same for routers whose cached route is still `active`.
+- **After the switch the source is never unfrozen,** so a router with a stale route can only read identical data there; never write to the old copy.
+- **The copy is a logical export** through the storage interface (`common/sql.py`), so the SQLite stand-in and Postgres behave the same:
+  - JSON lines: a header (format version, tenant, each service's schema version), then batches of rows per table, then an end record with the row count of every table.
+  - Every table of each service is copied (including idempotency keys, so a client retrying a create after the move still gets its original answer), except the migration records: the target's stack applies its own migrations, and the import refuses a different schema version (`409 schema_version_mismatch`).
+  - Keys (`seq`) are kept, so cursors issued before the move stay valid; the target's sequences continue after the highest key.
+  - The import refuses a target that already has data (`409 tenant_data_not_empty`), runs in one transaction per service, and works as each service's own login, so it can only write that service's schema.
+  - The source only exports a frozen tenant (`409 tenant_not_frozen`), so the snapshot is consistent.
+- **Who carries the data:** cells never call each other, so the control plane relays the stream from the source's `/internal/tenants/{id}/export` to the target's `/internal/tenants/{id}/import`, both with each cell's own credential. On AWS (stage 5) the control plane hands each cell a pre-signed S3 URL instead, so tenant data never passes through the control plane; the same S3 path carries cross-account moves (stage 7).
+- **Audit log:** every admin change (cells, tenants, rate limits, every move step, including refused and failed ones) is recorded in the control plane with who, what, which tenant and cells, the outcome and the time. `GET /v1/audit` lists it newest first with cursor pagination and filters by tenant or cell; `cellctl audit` prints it.
+
 Roadmap: near-zero-downtime moves via live replication / change data capture.
 
 ### 5.1 Cell lifecycle operations
@@ -601,4 +625,6 @@ All code, application and infrastructure, is written test-first.
 | Merge strategy | Squash merge only; PR title (conventional commits) becomes the commit message |
 | Customer-hosted cells | Built in v1 (model 3); fully self-hosted later |
 | Tenant stacks in a cell | The cell gateway creates each tenant's database and a login per service on the cell's Postgres (a schema per service, connection limit, statement timeout) and writes the stack's Kubernetes Secret (its service account may create, replace and delete Secrets, never read them); `cellctl` installs the `tenant-stack` release and activates the tenant; the gateway forwards `/v1/users` and `/v1/orders` with the tenant's stack credential. The cell's Postgres admin password is generated in the cluster and never leaves it. Replaces the sample `items` API and the pooled/isolated tier |
+| Tenant moves | A move is a control-plane record with fixed states (`started` → `copied` → `switched` → `completed`, or `rolled_back`), driven step by step by `cellctl` (Helm installs) like onboarding. The copy is a logical JSON-lines export through the storage interface (works on SQLite and Postgres, keeps keys, refuses a schema-version mismatch), relayed by the control plane because cells never call each other; pre-signed S3 URLs on AWS (stage 5) so data bypasses the control plane. The router and the frozen source both pause writes; the source is never unfrozen after the switch. `pg_dump` was rejected: it needs Postgres client tools in the gateway image and can't run against the in-process stand-in |
+| Audit log | Control-plane table of every admin change and move step (actor, action, tenant, cell, outcome, detail, time), newest first via `GET /v1/audit` with cursor pagination. CloudWatch Logs copy on AWS (stage 5) |
 | Tenant service storage | One `Database` interface (`common/sql.py`) chosen by `DATABASE_URL`: PostgreSQL (psycopg 3) in cells and on Aurora, SQLite as the in-process stand-in. Portable SQL (`?` placeholders, dict rows, `{seq_pk}` identity keys), driver errors mapped to `IntegrityError` / `DatabaseError`, migrations serialised by a per-namespace lock (Postgres advisory lock). Postgres major version 17 to match Aurora |

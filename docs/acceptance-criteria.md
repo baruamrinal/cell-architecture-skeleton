@@ -108,3 +108,26 @@ Every tenant gets its own `user-account` and `order-processing` containers and i
 | A54 | an onboarded tenant with data | it is deleted (`cellctl tenants delete`) | its stack is uninstalled, its database, logins and secret are dropped, and it is gone from the control plane and the cell (the router answers `404 unknown_tenant`) |
 | A55 | onboarding where any step fails (no capacity, the cell refuses, the stack doesn't start) | `cellctl tenants create` runs | every step done so far is undone: no tenant record, database or stack is left behind |
 | A56 | a tenant's database on the cell's Postgres server | each service logs in with its own login | it can use only its own schema in its own tenant's database: not the other service's schema, and not another tenant's database (runs when `POSTGRES_URL` is set) |
+
+## Stage 3: tenant moves
+
+### Moving a tenant between cells
+
+One procedure moves a tenant from one cell to another (docs/plan.md §5): promote, demote, drain and consolidate reuse it.
+
+| ID | Given | When | Then |
+|---|---|---|---|
+| A57 | a tenant with users, orders and an idempotent create on cell-1 | it is moved to cell-2 (`cellctl tenants move acme --to cell-2`) | it is served from cell-2 (`X-Cell-ID`) with the same users, orders and IDs; cursors from before the move still work; retrying the create with the same `Idempotency-Key` replays the original answer; new users and orders get fresh keys; its stack, database and secret are gone from cell-1 and the move is `completed` |
+| A58 | a tenant being moved (`migrating`) | it sends reads and writes, through a fresh route and through a router whose cached route is still `active` | reads are served; writes get `503 tenant_migrating` with `Retry-After`, from the router or from the frozen source cell |
+| A59 | a move that fails before the switch (the target stack never starts, the target refuses the copy, or the target stack isn't ready to take over) | `cellctl tenants move` runs | it is rolled back: the tenant is `active` on cell-1 with all its data and takes writes again, nothing of it is left on cell-2, and the move is `rolled_back` |
+| A60 | a moved tenant whose source cell fails to delete the old copy | the move completes | the tenant is served from the target; the move is `completed` with `cleanup_pending` set, so the leftover can be cleaned up |
+| A61 | a router that cached the tenant's old route | the tenant has been moved | the old cell answers `421`; the router refreshes the route and the request is served by the new cell |
+| A62 | a move to the same cell, an unknown, inactive or full cell, of a tenant that isn't `active`, or of a tenant already being moved | the move is requested | it is refused (`409` / `404` / `422` with the reason) and nothing changes |
+| A63 | a moved tenant on a cell that hosts another tenant | each lists and reads users and orders | neither sees the other's data: the import wrote only into the moved tenant's own database |
+| A64 | a tenant's data on a cell's Postgres server | it is exported and imported into another server | every row, key and idempotency record arrives, the target's sequences continue after the highest key, and the import refuses a target with data or another schema version (runs when `POSTGRES_URL` is set) |
+
+### Audit log
+
+| ID | Given | When | Then |
+|---|---|---|---|
+| A65 | admin changes: cells registered and changed, tenants created and deleted, rate limits set, every move step | they succeed, are refused or fail | each is in `GET /v1/audit` with who, what, the tenant and cells, the outcome and the time, newest first, with cursor pagination and filters by tenant and cell; `cellctl audit` prints it |

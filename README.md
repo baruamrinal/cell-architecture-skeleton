@@ -130,6 +130,14 @@ TENANT LIFECYCLE
   cellctl tenants delete <tenant-id>
   cellctl tenants list
   cellctl tenants get <tenant-id>
+  cellctl tenants move <tenant-id> [--to CELL]
+
+MOVES AND AUDIT LOG
+  cellctl moves list [--tenant T]
+  cellctl moves show <move-id>
+  cellctl moves rollback <move-id>
+  cellctl moves complete <move-id>
+  cellctl audit [--tenant T] [--cell C] [--limit N] [--cursor C]
 
 OVERVIEW
   cellctl status
@@ -233,7 +241,52 @@ cellctl tenants get acme                                # "rate_limit": {"rps", 
 - **Several routers:** set `ROUTER_REPLICAS`, and each router enforces its share (limit ÷ replicas).
 - **Shared limiter (optional):** set `RATE_LIMIT_BACKEND=redis` in `.env`, then `. .\make up`; Redis then runs in the platform cluster. All routers then share **one** bucket per tenant in Redis, so the full limit is exact and `ROUTER_REPLICAS` no longer splits it. It **fails open**: if Redis is down, each router falls back to its own limits, and Redis is retried every few seconds. Traffic never stops because of Redis.
 
-Moving tenants between cells (stage 3) and seasonal schedules (stage 4) will be added here.
+### Moving a tenant to another cell
+
+```powershell
+cellctl tenants move acme --to cell-2    # or leave out --to and placement chooses a cell
+cellctl moves list --tenant acme
+```
+
+```text
+Moving acme from cell-1 to cell-2 (mv_3f2a9c1b04de); writes are paused.
+Starting acme's services in cell-2's cluster...
+Copying acme's data to cell-2...
+Copied 42 rows. Switching acme to cell-2...
+acme is served by cell-2. Removing it from cell-1...
+Tenant acme moved to cell-2.
+```
+
+The tenant keeps its users, orders and IDs; cursors and `Idempotency-Key`s from before the move still work. What happens:
+1. **Start:** the tenant becomes `migrating` and is frozen on its cell. Reads keep working; writes get `503 tenant_migrating` with `Retry-After`. The target cell creates the tenant's database.
+2. `cellctl` installs the tenant's stack on the target. Its services create their tables.
+3. **Copy:** the control plane streams the old cell's export into the new cell. It refuses a target with data or another schema version.
+4. **Switch:** the route points to the new cell and the tenant is `active` again.
+5. `cellctl` uninstalls the old stack, and the old cell drops its copy of the tenant.
+
+- **If a step before the switch fails,** the move is rolled back: the tenant stays on its old cell with all its data and takes writes again.
+- **If `cellctl` is interrupted,** `cellctl moves rollback <move-id>` finishes the rollback.
+- **If the old cell can't drop its copy,** the move still completes, flagged `cleanup_pending`. Retry with `cellctl moves complete <move-id>`.
+
+See [docs/plan.md §5](docs/plan.md).
+
+### Audit log
+
+Every admin change is recorded: cells, tenants, rate limits and every move step, including refused and failed ones.
+
+```powershell
+cellctl audit --tenant acme
+```
+
+```text
+TIME                              ACTOR         ACTION         OUTCOME    TENANT  CELL           ERROR
+2026-11-14T10:02:11.031829+00:00  admin:mrinal  move.complete  succeeded  acme    cell-1->cell-2  -
+2026-11-14T10:02:10.912002+00:00  admin:mrinal  move.switch    succeeded  acme    cell-1->cell-2  -
+```
+
+Newest first. `--cell`, `--limit` and `--cursor` page through the rest. Raw form: `GET /v1/audit`.
+
+Seasonal schedules (stage 4) will be added here.
 
 ### Platform overview
 
