@@ -33,6 +33,14 @@ spec:
               value: {{ .Values.router.replicas | quote }}
             - name: ROUTE_CACHE_TTL_SECONDS
               value: {{ .Values.router.routeCacheTtlSeconds | quote }}
+            - name: SESSION_JWKS_URL
+              value: {{ .Values.sessions.jwksUrl | quote }}
+            - name: SESSION_ISSUER
+              value: {{ .Values.sessions.issuer | quote }}
+            - name: SESSION_AUDIENCE
+              value: {{ .Values.sessions.audience | quote }}
+            - name: TENANT_BASE_DOMAIN
+              value: {{ .Values.sessions.baseDomain | quote }}
             - name: RATE_LIMIT_BACKEND
               value: {{ ternary "redis" "memory" .Values.redis.enabled | quote }}
             {{- if .Values.redis.enabled }}

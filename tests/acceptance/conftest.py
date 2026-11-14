@@ -155,6 +155,9 @@ class PlatformClusters(InProcessStacks):
         if chart.name == "cell":
             self.platform.start_cell(values["cellId"], values["secrets"]["internalToken"])
             return
+        if chart.name == "mgr":  # the in-process cell starts with its mgr (attach_mgr)
+            self.calls.append(("mgr", short))
+            return
         super().helm_upgrade(short, release, chart, dict(values), **kw)
 
     def ensure_network(self) -> None:

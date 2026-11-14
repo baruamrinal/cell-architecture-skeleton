@@ -85,3 +85,12 @@ def test_network_policies_allow_only_the_gateway_and_the_sibling() -> None:
         "app.kubernetes.io/component": "order-processing",
     } in users_from
     assert orders_from == [gateway]
+
+
+def test_tenant_services_are_scheduled_as_api() -> None:
+    from .conftest import find
+
+    objects = render("tenant-stack", REQUIRED)
+    for name in ("user-account", "order-processing"):
+        pod = find(objects, "Deployment", name)["spec"]["template"]["spec"]
+        assert pod["priorityClassName"] == "cellarch-api"

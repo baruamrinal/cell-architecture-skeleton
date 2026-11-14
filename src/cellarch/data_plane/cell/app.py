@@ -57,6 +57,10 @@ FORWARDED_REQUEST_HEADERS = ("content-type", "accept", "idempotency-key", "x-req
 FORWARDED_RESPONSE_HEADERS = ("content-type", "idempotent-replay", "retry-after")
 FORWARDED_GRAPHQL_HEADERS = ("content-type", "accept", "x-request-id", "x-cellarch-csrf")
 RETRY_AFTER = {"Retry-After": "1"}
+# A tenant's /readyz must answer quickly. A new pod can swallow connections until its
+# network policy is in place, so the probe gives up long before the control plane's
+# call to the cell does (10 s): the answer is then 409 (retry), never a timeout.
+READINESS_PROBE_TIMEOUT_SECONDS = 2.0
 READ_METHODS = frozenset({"GET", "HEAD"})
 FROZEN = "frozen"  # being moved: reads only
 
@@ -293,7 +297,10 @@ def create_app(
 
         async def ready(service: str) -> bool:
             try:
-                response = await http.get(f"{service_url(tenant_id, service)}/readyz")
+                response = await http.get(
+                    f"{service_url(tenant_id, service)}/readyz",
+                    timeout=READINESS_PROBE_TIMEOUT_SECONDS,
+                )
             except httpx.HTTPError:
                 return False
             return response.status_code == 200

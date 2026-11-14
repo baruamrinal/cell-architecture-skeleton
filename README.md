@@ -81,6 +81,18 @@ curl -H "X-Tenant-ID: acme" -H "Content-Type: application/json" -d '{\"user_id\"
 ```
 `/v1/users` goes to the tenant's own `user-account` service and `/v1/orders` to its own `order-processing` service. Creates accept an `Idempotency-Key` header; lists return `{"items": [...], "next_cursor": ...}`.
 
+**The web UI's GraphQL API** (stage 4; the `web-ui` front end follows). Every tenant has its own address, `http://<tenant>.localhost:8080` (browsers send `*.localhost` to your machine). Sign in there with the development-only identity provider, then query `/graphql`:
+```powershell
+# Sign in for acme (the dev identity provider sets the session cookie for acme.localhost)
+curl -c acme.cookies -X POST http://acme.localhost:8080/auth/dev/sign-in
+# Queries go as GET, mutations as POST with the anti-CSRF header
+curl -b acme.cookies "http://acme.localhost:8080/graphql?query=%7Bme%7BtenantId%20cellId%7D%7D"
+curl -b acme.cookies -H "X-Cellarch-CSRF: 1" -H "Content-Type: application/json" -d '{\"query\":\"mutation { createUser(input: {email: \\\"ana@acme.test\\\", name: \\\"Ana\\\"}) { id } }\"}' http://acme.localhost:8080/graphql
+```
+- The tenant comes from the address. A session for another tenant gets `403 session_tenant_mismatch`; no session gets `401`.
+- `/graphql` is answered by `mgr`, which runs in **every cell** and serves only that cell's tenants. Ship a new `mgr` on its own with `.\make deploy-mgr`: it rebuilds `mgr` with a new tag (`<version>-<commit>`) and upgrades only `mgr` in every cell. The tag is recorded in `deploy/versions/local.yaml`, so cells deployed later get the same version.
+- If `curl` can't resolve `acme.localhost`, add `--resolve acme.localhost:8080:127.0.0.1`.
+
 Stop everything with `.\make down`. To also delete all data, run `.\make clean`.
 
 ## Admin CLI (`cellctl`)
@@ -377,15 +389,19 @@ Each cell handles at most `MAX_CONCURRENT_REQUESTS` requests at once (default 10
 
 Each component has **its own image**, built from one multi-stage Dockerfile. Each image contains only that component's code:
 ```powershell
-docker build --target router -t cellarch/router:dev .   # also: control-plane, cell-gateway, user-account, order-processing
+docker build --target router -t cellarch/router:dev .   # also: control-plane, cell-gateway, user-account, order-processing, dev-idp
+docker build --target mgr -t cellarch/mgr:0.1.0-abc1234 .   # mgr: its own version, released on its own
 ```
 
 Helm charts for the Kubernetes runtime (stage 2.6, one cluster per cell):
 
 | Chart | Installed into | Contains |
 |---|---|---|
-| `charts/platform` | the platform cluster | router, control plane, optional Redis |
-| `charts/cell` | **each cell's own cluster** | the cell gateway (the cell's database server and tenant stacks join it in stage 2.5) |
+| `charts/platform` | the platform cluster | router, control plane, optional Redis, and locally the edge proxy (the production ALB's stand-in: every tenant host on one port) |
+| `charts/dev-idp` | the platform cluster, **development only** | the identity provider stand-in for the web UI's sign-in |
+| `charts/cell` | **each cell's own cluster** | the cell gateway and the cell's database server |
+| `charts/tenant-stack` | each cell's cluster, one release per tenant | the tenant's `user-account` and `order-processing` |
+| `charts/mgr` | **each cell's own cluster**, release `mgr` | the web UI's GraphQL backend, with its own autoscaler, disruption budget and network policy |
 
 - **Hardened by default:** non-root, read-only filesystem, all capabilities dropped, probes and resource limits, tokens only from Kubernetes secrets.
 - **Network policies:** deny all ingress, then allow only what each component needs.

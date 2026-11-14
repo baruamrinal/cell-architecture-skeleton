@@ -1,0 +1,6 @@
+apiVersion: v2
+name: dev-idp
+description: DEVELOPMENT ONLY identity provider for the web UI, in the local platform cluster (docs/plan.md §2.4)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

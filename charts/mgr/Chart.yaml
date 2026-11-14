@@ -1,0 +1,8 @@
+apiVersion: v2
+name: mgr
+description: The web UI's GraphQL backend, one release in every cell's cluster (docs/plan.md §2.4)
+type: application
+# The chart has its own version; the image tag comes from the per-environment versions
+# file (independent delivery): mgr releases never wait for the platform or the cells.
+version: 0.1.0
+appVersion: "0.1.0"

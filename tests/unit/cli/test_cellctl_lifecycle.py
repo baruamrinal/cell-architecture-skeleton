@@ -386,3 +386,25 @@ class TestRegistrationWaitsForCellDns:
         sleeps: list[float] = []
         assert api.deploy(charts, clusters, sleeps) == 1
         assert (api.attempts, sleeps) == (1, [])
+
+
+class TestNewCellsGetMgr:
+    """A new cell gets the web UI's backend at the version this environment runs."""
+
+    def test_installs_the_recorded_mgr_version(self, charts: Path) -> None:
+        from cellarch.cli.versions import write_version
+
+        write_version(charts.parent, "mgr", "0.4.2-abc1234")
+        clusters, sleeps = FakeClusters({"platform": "running"}), list[float]()
+        assert ScriptedControlPlane([(201, "")]).deploy(charts, clusters, sleeps) == 0
+        assert ("import", "cell-4", ("cellarch/mgr:0.4.2-abc1234",)) in clusters.calls
+        mgr = next(c for c in clusters.calls if c[0] == "helm" and c[2] == "mgr")
+        assert mgr[3] == {"cellId": "cell-4", "image": {"tag": "0.4.2-abc1234"}}
+
+    def test_without_a_recorded_version_it_says_how_to_add_it(
+        self, charts: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        clusters, sleeps = FakeClusters({"platform": "running"}), list[float]()
+        assert ScriptedControlPlane([(201, "")]).deploy(charts, clusters, sleeps) == 0
+        assert not any(c[0] == "helm" and c[2] == "mgr" for c in clusters.calls)
+        assert "make deploy-mgr" in capsys.readouterr().err

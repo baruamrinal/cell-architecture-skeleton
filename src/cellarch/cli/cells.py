@@ -14,6 +14,7 @@ from typing import Any
 from cellarch.cli.api import AdminApi, CommandError
 from cellarch.cli.clusters import ClusterError, ClusterToolkit, cell_url, cluster_name
 from cellarch.cli.onboarding import Progress
+from cellarch.cli.versions import read_versions
 from cellarch.common.contracts import is_valid_tenant_id
 
 CELL_RELEASE = "cellarch"
@@ -22,6 +23,7 @@ GATEWAY_IMAGE = "cellarch/cell-gateway:dev"
 REGISTER_ATTEMPTS, REGISTER_DELAY_SECONDS = 21, 3.0
 # The tenants' services run in every cell cluster (tenant-stack chart).
 TENANT_IMAGES = ["cellarch/user-account:dev", "cellarch/order-processing:dev"]
+MGR = "mgr"  # the web UI's backend: delivered on its own, at the version in the versions file
 
 
 class UsageError(Exception):
@@ -80,6 +82,7 @@ def deploy_cell(
         values = {"cellId": cell_id, "secrets": {"internalToken": credential}}
         clusters.helm_upgrade(cell_id, CELL_RELEASE, chart, values)
         sync_cell_dns(clusters)
+        install_mgr(clusters, charts_dir, cell_id, progress)
         progress(f"Registering {cell_id} with the control plane...")
         registration = {**body, "url": cell_url(cell_id), "credential": credential}
         attempt = 1
@@ -102,6 +105,23 @@ def deploy_cell(
         raise
     progress(f"Cell {cell_id} is deployed in its own cluster and ready for tenants.")
     return cell
+
+
+def install_mgr(
+    clusters: ClusterToolkit, charts_dir: Path, cell_id: str, progress: Progress
+) -> None:
+    """Give a new cell the web UI's backend at the version this environment runs."""
+    tag = read_versions(charts_dir.resolve().parent).get(MGR)
+    if tag is None:
+        progress(
+            f"note: no mgr version recorded yet; run `make deploy-mgr` to add it to {cell_id}."
+        )
+        return
+    progress(f"Starting mgr {tag} in {cell_id}...")
+    clusters.import_images(cell_id, [f"cellarch/{MGR}:{tag}"])
+    clusters.helm_upgrade(
+        cell_id, MGR, charts_dir / MGR, {"cellId": cell_id, "image": {"tag": tag}}
+    )
 
 
 def decommission_cell(

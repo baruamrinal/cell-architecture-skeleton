@@ -223,6 +223,39 @@ class TestInternalApi:
         tenants = cell.client.get("/internal/tenants", headers=INTERNAL).json()
         assert [(t["tenant_id"], t["status"]) for t in tenants] == [("acme", "active")]
 
+    def test_a_hanging_readiness_probe_is_not_ready_rather_than_a_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """A new pod can swallow connections until its network policy is in place; the
+        probe must give up well before the control plane's call to the cell does, so
+        the answer is 409 (retry) rather than a timeout (onboarding undone)."""
+        import httpx
+
+        from cellarch.data_plane.cell.app import READINESS_PROBE_TIMEOUT_SECONDS
+
+        timeouts: list[float | None] = []
+
+        def stack(request: httpx.Request) -> httpx.Response:
+            timeouts.append(request.extensions["timeout"]["read"])
+            raise httpx.ReadTimeout("no answer", request=request)
+
+        app = create_app(
+            CellSettings(
+                cell_id="cell-x",
+                db_path=str(tmp_path / "c.db"),
+                internal_token=TOKEN,
+                tenant_db_admin_url=f"sqlite:///{tmp_path.as_posix()}/tenants",
+            ),
+            secrets=MemorySecrets(),
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(stack), timeout=10),
+        )
+        client = TestClient(app)
+        client.post("/internal/tenants", json={"tenant_id": "acme"}, headers=INTERNAL)
+        response = client.post("/internal/tenants/acme/activate", headers=INTERNAL)
+        assert (response.status_code, response.json()["error"]) == (409, "tenant_stack_not_ready")
+        assert timeouts and all(t == READINESS_PROBE_TIMEOUT_SECONDS for t in timeouts)
+        assert READINESS_PROBE_TIMEOUT_SECONDS <= 3  # well under the control plane's 10 s
+
     def test_activating_an_unknown_tenant(self, cell: Cell) -> None:
         response = cell.client.post("/internal/tenants/nobody/activate", headers=INTERNAL)
         assert (response.status_code, response.json()["error"]) == (404, "tenant_not_found")
