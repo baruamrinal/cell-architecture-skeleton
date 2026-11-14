@@ -82,11 +82,12 @@ client ──X-Tenant-ID──► Router ───────────┼─
 - Per-tenant token-bucket rate limiting and usage metering.
 - On `421 tenant_not_in_cell` it refreshes the route and retries once.
 - Blocks `/internal/*` and strips internal headers from client requests.
+- For the web UI's `/graphql`, takes the tenant from a verified session token instead of a client header (§2.4).
 
 **Cell (identical deployable unit)**: a gateway, one database server, and one service stack per tenant (§3.4).
 - **Cell gateway:** the cell's single entry point.
   - Keeps the registry of tenants the cell hosts and where each tenant's services run.
-  - Routes `/v1/users…` → the tenant's user-account and `/v1/orders…` → the tenant's order-processing.
+  - Routes `/v1/users…` → the tenant's user-account and `/v1/orders…` → the tenant's order-processing, and `/graphql` → the cell's `mgr` (§2.4).
   - Rejects tenants it doesn't host (`421`); frozen tenants are read-only (writes get `503`).
   - Caps requests handled at once, rejecting the excess immediately.
   - Stamps `X-Cell-ID` on every response.
@@ -94,6 +95,7 @@ client ──X-Tenant-ID──► Router ───────────┼─
   - Its `/internal/*` endpoints (provision, freeze, export, import, delete) require the cell's credential.
 - **Cell database server** (Postgres): one per cell, **never shared between cells**. It holds one database per tenant of the cell.
 - **Per-tenant service stack:** `user-account` and `order-processing`, the tenant's own containers, connected only to the tenant's own database.
+- **`mgr`:** the web UI's GraphQL backend, one deployment per cell serving that cell's tenants through the gateway's `/v1` API (§2.4).
 
 ### 2.3 Control plane access
 
@@ -124,15 +126,23 @@ router (platform cluster) ──in-cluster service──────────
 
 ### 2.4 Tenant web UI (`web-ui` + `mgr`)
 
-A tenant's own users browse and manage their users and orders in a browser. They see only their own tenant's data, and nothing changes in the cells or the control plane.
+A tenant's own users browse and manage their users and orders in a browser. They see only their own tenant's data. The UI follows the cell architecture: only static files are shared, and everything that serves a tenant's request runs inside that tenant's cell.
 
 ```
-browser ─▶ ingress ─┬─ /         ─▶ web-ui (React, static, N pods)
-                    └─ /graphql  ─▶ mgr (GraphQL, M pods) ─▶ router /v1 ─▶ cell ─▶ tenant services
+browser ─▶ ingress ─┬─ /          ─▶ web-ui (static files, platform cluster)
+                    └─ /graphql   ─▶ router ─(tenant from the verified session)─▶ tenant's cell
+                                                                                 └─▶ gateway ─▶ mgr ─▶ gateway /v1 ─▶ tenant's services
 ```
 
-- **Two separate platform services,** each with its own image, Helm chart (`charts/web-ui`, `charts/mgr`) and release in the platform cluster, next to the router. Each is deployed, versioned and scaled on its own, with its own autoscaler limits. Neither is per cell or per tenant, and both are stateless.
-- **`mgr` is a client of the public `/v1` API only.** It has no access to any database, the control plane or `/internal/*`, so the UI keeps working while the control plane is down, and a tenant move looks to the UI like any other client (read-only during the move, then normal again).
+- **`web-ui` is a platform service:** static files only (no logic, no tenant data), in the platform cluster, with its own image, chart (`charts/web-ui`), release and autoscaler. Later it can sit behind a CDN.
+- **`mgr` is a cell service:** it runs in **every cell's cluster** (one release per cell from its own chart, `charts/mgr`) and serves only the tenants of its cell. Each cell's `mgr` has its own autoscaler, so UI capacity grows with each cell added, and a tenant on a dedicated cell gets its own `mgr`. A bad `mgr` release or a heavy tenant affects one cell only.
+- **The router stays thin:** for `/graphql` it verifies the session token and reads its tenant claim (no business logic), then routes and rate-limits exactly as for any request. A client's own `X-Tenant-ID` is ignored on that path. Because limits apply in the router, before `mgr`, one tenant can't exhaust another's UI capacity.
+- **`mgr` reaches tenant data only through its cell's gateway `/v1` API,** for the session's tenant only. The gateway adds the tenant's stack credential, so `mgr` never holds one. It has no database and no access to the control plane or `/internal/*`, so the UI keeps working while the control plane is down. During a tenant move the gateway answers writes with `503 tenant_migrating`, and the UI shows the tenant as read-only until the switch.
+
+**Why this shape (validated against the published standards):**
+- AWS Well-Architected, *Reducing the Scope of Impact with Cell-Based Architecture*: a cell is *"a complete workload, with everything needed to operate independently"*; the router is *"the thinnest possible layer, with the responsibility of routing requests to the right cell, and only that"*, *"avoiding complex business logic within this layer"*; changes go out *"compartment by compartment"*. A GraphQL layer is business logic, so it belongs in the cells, not in the shared layer.
+- Google Workspace SRE, *How to partition cloud applications to avoid global outages*: *"Each partition contains all the various servers necessary to service a user request from end to end"*, and changes are deployed *"to one partition at a time"*, canaried within a partition.
+- A single shared `mgr` in the platform cluster (a common pattern without cells) was rejected: it would put application logic in the shared layer, make every `mgr` release and every heavy tenant affect all tenants, and give UI capacity a single ceiling.
 
 **`web-ui` (front-end container)**
 - React + TypeScript, Vite, pnpm (version pinned via Corepack). GraphQL client **urql**; its document cache refetches queries after a mutation (Graphcache can be added later). Types generated by GraphQL Code Generator from `mgr`'s schema.
@@ -140,48 +150,55 @@ browser ─▶ ingress ─┬─ /         ─▶ web-ui (React, static, N pods)
 - Tests: Vitest + Testing Library with MSW faking `/graphql`; ESLint, `tsc --noEmit` and a coverage gate in CI.
 - Image: Dockerfile target `web-ui`: a Node + pnpm build stage, then unprivileged nginx (pinned by digest) serving `dist/`. Source in `web-ui/` at the repo root.
 
-**`mgr` (GraphQL backend container)**
+**`mgr` (GraphQL backend container, in each cell)**
 - Python 3.12, FastAPI + Strawberry; the usual `create_app(settings, http_client)` factory and `from_env()`. Source in `src/cellarch/mgr/`.
 - Queries: `me`, `users(first, after)`, `user(id) { orders }`, `orders(userId, first, after)`, `order(id)`, all with cursor paging. Mutations: `createUser`, `deleteUser`, `createOrder`, `cancelOrder`, each passing an idempotency key through.
 - Protection: DataLoader batching (a user's orders load in one batched call), query depth and cost limits, introspection off in production.
 - Errors: the API's error shape goes into `errors[].extensions` (`code`, `status`, `Retry-After`).
-- **Tenant identity:** locally a dev sign-in stores the tenant in a signed cookie; in production an OIDC token (e.g. Cognito) carries a tenant claim. `mgr` sets `X-Tenant-ID`; the browser never does.
-- `/healthz`, plus `/readyz` (router reachable). Structured logs with `request_id` and `tenant_id`.
+- `/healthz`, plus `/readyz` (its cell gateway reachable). Structured logs with `request_id`, `tenant_id` and `cell_id`.
 
-**Kubernetes (two charts, two releases in the platform cluster)**
-- Each of `charts/web-ui` and `charts/mgr`: Deployment, Service, autoscaler (min and max replicas and target utilisation set per release), PodDisruptionBudget and NetworkPolicy, with resource requests and limits on every pod.
-- Network access: `web-ui` makes no outbound calls; `mgr` can call only the router.
-- The router has a higher scheduling priority than the UI pods, so UI load can't crowd it out.
-- Ingress routes by path on one hostname, so no CORS setup is needed and the session cookie is locked to the site (`SameSite=Strict`).
-- Replicas: 1 each locally, at least 2 across availability zones in production.
+**Sign-in and tenant identity**
+- Sign-in is the identity provider's job, behind one OIDC token interface: **Cognito** in production (a tenant claim in the token); locally a **dev identity provider** stand-in in the platform cluster that issues the same kind of signed token after you pick a tenant, clearly marked development-only.
+- The token travels in an `HttpOnly`, `Secure`, `SameSite=Strict` cookie on the single site; GraphQL mutations also need a custom request header, so a cross-site form can't trigger them.
+- The router verifies the token's signature with the provider's public keys (no call per request), takes the tenant from the claim and sets `X-Tenant-ID`. Missing or invalid sessions get `401` before reaching any cell. The browser never sets the tenant.
+
+**Kubernetes**
+- `charts/web-ui` (platform cluster) and `charts/mgr` (every cell cluster): Deployment, Service, autoscaler (min and max replicas and target utilisation set per release), PodDisruptionBudget and NetworkPolicy, with resource requests and limits on every pod.
+- Network access: `web-ui` makes no outbound calls; `mgr` accepts traffic only from its cell's gateway and can call only that gateway.
+- Scheduling priority: the router above `web-ui` in the platform cluster; the gateway and tenant services above `mgr` in each cell, so UI load can't crowd out the API.
+- Ingress routes by path on one hostname (`/` to `web-ui`, `/graphql` to the router), so no CORS setup is needed.
+- Replicas: 1 each locally; in production at least 2 across availability zones for `web-ui` and for `mgr` in every cell.
 
 **Acceptance criteria** (written test-first in the `mgr` and `web-ui` PRs):
 - A tenant sees only its own users and orders, even when it asks for another tenant's id.
-- Requests without a session are rejected, and the browser can't override the tenant.
+- Requests without a valid session are rejected by the router (`401`), and the browser can't override the tenant.
+- Each cell's `mgr` serves only the tenants its cell hosts.
 - A user's orders load in one batched call, not one call per user.
 - A rate-limited tenant gets a GraphQL error with `Retry-After`.
 - A create retried with the same idempotency key doesn't make a duplicate.
 - Queries that are too deep or too costly are rejected.
 - The UI keeps working when the control plane is down.
-- During a tenant move, the UI shows the tenant as read-only, then works again after the switch.
-- Under load, the `mgr` autoscaler adds pods (k3d smoke test).
+- During a tenant move, the UI shows the tenant as read-only, then works again after the switch, served by the new cell's `mgr`.
+- Under load, a cell's `mgr` autoscaler adds pods in that cell (k3d smoke test).
 - Front-end: screens render data, page through results, show errors, and run each mutation (Vitest).
 
 **Independent delivery.** `web-ui` and `mgr` each ship on their own cadence, never waiting for the rest of the platform or for each other:
-- **Own build:** each service builds, tests and publishes only when its own files change (CI path filters: `web-ui/**` for `web-ui`, `src/cellarch/mgr/**` plus its contract tests for `mgr`). `web-ui` has its own `package.json` and pnpm lockfile; `mgr` has its own Dockerfile target and dependency list. A change to the router or a cell doesn't rebuild either of them, and a change to one doesn't rebuild the other.
+- **Own build:** each builds, tests and publishes only when its own files change (CI path filters: `web-ui/**`; `src/cellarch/mgr/**` plus its contract tests). `web-ui` has its own `package.json` and pnpm lockfile; `mgr` has its own Dockerfile target and dependency list.
 - **Own version:** each has its own semantic version, and each image is tagged with it plus the git commit (`mgr:1.4.0-3f2a9c1`), never a shared tag. Each chart has its own chart version.
-- **Own release and rollback (production: stage 7):** in production each is its own Argo CD Application, deployed by its own pipeline as soon as it is green: not part of the platform release or the cell-by-cell waves. Rolling it back means redeploying its previous version, nothing else.
-- **Locally:** `make deploy-web-ui` and `make deploy-mgr` build only that image, load it into the platform cluster with a fresh tag, and upgrade only that release, so the pods roll out at once without `make up`.
+- **Own release and rollback (production: stage 7):**
+  - `web-ui` is its own Argo CD Application, deployed as soon as it is green, outside the platform release; rolling it back redeploys its previous version.
+  - `mgr` has its own pipeline that rolls out **cell by cell**, like the tenant services (§3.4): canary cell first, bake time, alarm checks, automatic rollback per wave. An `mgr` rollout never redeploys the gateway, the tenant services or the platform. Its approved version is in the per-environment versions file, so a new cell (`cellctl cells deploy`) gets it too.
+- **Locally:** `make deploy-web-ui` builds `web-ui` and upgrades only its release in the platform cluster; `make deploy-mgr` builds `mgr`, loads it into every cell cluster with a fresh tag, and upgrades only the `mgr` release in each.
 - **Contracts instead of lockstep:**
-  - `mgr` depends only on the router's versioned `/v1` API. Contract tests pin what it uses, so `mgr` and the tenant services can each deploy without the other.
-  - `web-ui` depends only on `mgr`'s GraphQL schema. The schema changes additively: new fields first; removals only after a deprecation period, once no deployed `web-ui` uses them. A schema check in `mgr`'s CI rejects breaking changes against the published schema, so either side can deploy first.
-- **Runtime configuration:** `web-ui` reads its settings (GraphQL path, sign-in provider) from a `config.json` served next to it at startup, never baked in at build time, so one image moves unchanged from local to staging to production.
+  - `mgr` depends only on the cell gateway's `/v1` API (the same contract the router exposes). Contract tests pin what it uses, so `mgr` and the tenant services can each deploy without the other.
+  - `web-ui` depends only on `mgr`'s GraphQL schema. During an `mgr` wave different cells run different versions, so the schema changes additively: new fields first; removals only after a deprecation period, once no deployed `web-ui` uses them. A schema check in `mgr`'s CI rejects breaking changes against the published schema.
+- **Runtime configuration:** `web-ui` reads its settings (GraphQL path, sign-in provider) from a `config.json` served next to it, never baked in at build time, so one image moves unchanged from local to staging to production.
 
-**Production equivalent:** the same containers on the EKS platform cluster, behind the router's existing ALB (with WAF) using path rules: no new load balancer. Cognito for sign-in; CloudFront in front of `web-ui` is an option for later.
+**Production equivalent:** `web-ui` behind the router's existing ALB (with WAF) by path rule, CloudFront in front as an option for later; `/graphql` through the same ALB to the router, then each cell's internal NLB to its gateway and `mgr` in the cell's EKS cluster. No new load balancer. The router verifies Cognito tokens with Cognito's public keys.
 
-**What is built when:** stage 4 builds everything that runs locally: both services, their charts, independent versions and image tags, CI path filters, the schema check and contract tests, and `make deploy-web-ui` / `make deploy-mgr`. All production parts come later: the ALB rules and Cognito with the infrastructure (stage 6), and each service's production pipeline and Argo CD Application with delivery automation (stage 7).
+**What is built when:** stage 4 builds everything that runs locally: both services, their charts, the router's session check, the dev identity provider, independent versions and image tags, CI path filters, the schema check and contract tests, and `make deploy-web-ui` / `make deploy-mgr`. All production parts come later: the ALB rules and Cognito with the infrastructure (stage 6), and each service's production pipeline (cell-by-cell waves for `mgr`) with delivery automation (stage 7).
 
-**Cost:** no new AWS resources per cell, only pods in the platform cluster. Cognito pricing to be confirmed in the infrastructure stage (6).
+**Cost:** `web-ui` is a few pods in the platform cluster. `mgr` adds a small deployment to every cell (in production at least 2 pods across availability zones), so its cost grows with the number of cells, as the rest of a cell does. No new AWS resources per cell beyond those pods. Cognito pricing to be confirmed in the infrastructure stage (6).
 
 ---
 
@@ -616,10 +633,10 @@ Stack: Python 3.12, FastAPI, httpx, pydantic, pytest. SQLite locally, Aurora Pos
 | 2.5 | Tenant services | Cell gateway; per-tenant `user-account` and `order-processing` containers; one Postgres server per cell with a database per tenant and a schema and login per service; onboarding handshake and tenant delete; replaces the sample `items` API and the isolation tier (§3.4) |
 | 2.6 | Kubernetes runtime | One image per service; Helm charts (`platform`, `cell`, `tenant-stack` and per service) tested with lint, schema validation and helm-unittest; local k3d clusters (platform + one per cell); `make up` and `cellctl` driving Helm; CI smoke test on k3d; Docker Compose retired (§8.5) |
 | 3 | Tenant moves | **3a:** move procedure (start the tenant's stack on the target cell, copy its database, switch, roll back) and audit log. **3b:** promote/demote, drain, consolidate |
-| 4 | Tenant web UI | `mgr` (GraphQL over the router's public `/v1` API: cursor paging, DataLoader batching, depth and cost limits, idempotency keys, tenant from the session) and `web-ui` (React + TypeScript, urql, Vite, pnpm); Dockerfile targets and their own charts and releases in the platform cluster, `charts/web-ui` and `charts/mgr` (autoscaler, PodDisruptionBudget, NetworkPolicy, ingress by path), each scaled on its own; `make up` exposing both on one local port, and `make deploy-web-ui` / `make deploy-mgr` to ship either one alone; independent versions, image tags and CI path filters, a GraphQL schema compatibility check and `/v1` contract tests; CI jobs for pnpm lint, type-check, test and coverage in a separate `ci:` PR (§2.4); independent delivery for `user-account` and `order-processing` too: own versions, image tags and CI path filters, separate image values in `tenant-stack`, the per-environment versions file used by `cellctl`, their contract test and `make deploy-user-account` / `make deploy-order-processing` (their production pipelines with per-service waves are stage 7; §3.4) |
+| 4 | Tenant web UI | `web-ui` (React + TypeScript, urql, Vite, pnpm) as a platform service and `mgr` (GraphQL over the cell gateway's `/v1` API: cursor paging, DataLoader batching, depth and cost limits, idempotency keys) as a cell service in every cell; the router's session check (tenant from a verified token) and a local dev identity provider; Dockerfile targets and their own charts (`charts/web-ui`, `charts/mgr`) with autoscaler, PodDisruptionBudget and NetworkPolicy; `make up` exposing the UI on one local port, and `make deploy-web-ui` / `make deploy-mgr` to ship either one alone; independent versions, image tags and CI path filters, a GraphQL schema compatibility check and `/v1` contract tests; independent delivery for `user-account` and `order-processing` too: own versions, image tags and CI path filters, separate image values in `tenant-stack`, the per-environment versions file used by `cellctl`, their contract test and `make deploy-user-account` / `make deploy-order-processing` (all production pipelines, with per-service cell-by-cell waves for `mgr` and the tenant services, are stage 7); CI jobs for pnpm lint, type-check, test and coverage in a separate `ci:` PR (§2.4, §3.4) |
 | 5 | Seasonal scaling | Schedules, scheduler, standby-pool provisioner, season limits. (Local cell deploy/decommission via `cellctl` was pulled forward into stage 1; stage 5 builds the scheduler-driven provisioner on top.) |
 | 6 | Infrastructure | Terraform bootstrap, modules, platform and cell stacks (an **EKS cluster and Aurora cluster per cell**, a platform EKS cluster), dev environment, security guardrails, control plane admin access (API Gateway + IAM, SSM runbook), `cellctl` IAM signing, Terraform checks in CI |
-| 7 | Delivery automation | **Argo CD** (ApplicationSets, cell-by-cell waves), **independent production pipelines**: one per tenant service (`user-account`, `order-processing`) with its own cell-by-cell waves, and one per UI service (`web-ui`, `mgr`) as its own Argo CD Application outside the platform release and the waves; the per-environment versions file updated by each pipeline; External Secrets, `cd.yml` building and signing images, `cell-lifecycle.yml`, GitHub-workflow provisioner, `drift.yml` |
+| 7 | Delivery automation | **Argo CD** (ApplicationSets, cell-by-cell waves), **independent production pipelines**: one per tenant service (`user-account`, `order-processing`) with its own cell-by-cell waves, and `mgr` with its own cell-by-cell waves, and `web-ui` as its own Argo CD Application outside the platform release; the per-environment versions file updated by each pipeline; External Secrets, `cd.yml` building and signing images, `cell-lifecycle.yml`, GitHub-workflow provisioner, `drift.yml` |
 | 8 | Customer-hosted cells | `hosting` field and per-cell credentials (app), customer-bootstrap (CloudFormation + Terraform), PrivateLink module, cross-account image sharing, cross-account move via S3, metadata-only telemetry, maintenance windows, break-glass runbook |
 | 9 | Documentation | Architecture, cost model, security, deployment models, runbooks |
 
@@ -715,11 +732,11 @@ All code, application and infrastructure, is written test-first.
 | Tenant moves | A move is a control-plane record with fixed states (`started` → `copied` → `switched` → `completed`, or `rolled_back`), driven step by step by `cellctl` (Helm installs) like onboarding. The copy is a logical JSON-lines export through the storage interface (works on SQLite and Postgres, keeps keys, refuses a schema-version mismatch), relayed by the control plane because cells never call each other; pre-signed S3 URLs on AWS (stage 6) so data bypasses the control plane. The router and the frozen source both pause writes; the source is never unfrozen after the switch. `pg_dump` was rejected: it needs Postgres client tools in the gateway image and can't run against the in-process stand-in |
 | Dedicated cells | One tenant per dedicated cell (capacity 1, enforced at registration and on moves); `placement_mode` is set by the switch from the target cell's type. Promote, demote, drain and consolidate are `cellctl` workflows over the move procedure, with up-front room checks |
 | GraphQL backend for the UI | `mgr` (FastAPI + Strawberry) serves one GraphQL endpoint to `web-ui`, so a screen gets what it needs in one round trip; DataLoader batching, depth and cost limits and no production introspection keep it cheap and safe. The tenant services keep their REST `/v1` API |
-| UI services | `web-ui` and `mgr` are separate platform services: own images, charts and releases in the platform cluster, each scaled on its own by its autoscaler; not part of the `platform` chart, so a UI release never redeploys the router or control plane |
+| UI services | `web-ui` (static files) is a platform service; `mgr` (GraphQL) is a **cell service** that runs in every cell's cluster and serves only that cell's tenants. Each has its own image, chart, release and autoscaler. Validated against AWS Well-Architected (*Reducing the Scope of Impact with Cell-Based Architecture*: a cell is a complete workload; the router is the thinnest possible layer without business logic; changes go out cell by cell) and Google Workspace SRE (*How to partition cloud applications to avoid global outages*: each partition contains every server needed end to end; one partition at a time). A single shared `mgr` in the platform cluster was rejected: application logic in the shared layer, all tenants hit by one bad release or one heavy tenant, and a single capacity ceiling |
 | Tenant service delivery | `user-account` and `order-processing` are independently deployable like the UI services (own path filters, version, image tag and pipeline), but roll out cell by cell per service (canary cell, bake, alarms, automatic rollback). One `tenant-stack` release per tenant with a separate image value per service; a per-environment versions file tells `cellctl` and Argo CD which versions new stacks get; contract test between them; schema changes are expand-then-contract so two versions can run side by side |
-| UI delivery | Each of `web-ui` and `mgr` is independently deployable: own CI path filters, semantic version and image tag (`<version>-<commit>`), own Argo CD Application and pipeline outside the platform release and cell waves, `make deploy-web-ui` / `make deploy-mgr` locally. Coupling is replaced by contracts: `mgr` pins the `/v1` API it uses with contract tests; `mgr`'s GraphQL schema changes additively and a schema check rejects breaking changes; `web-ui` takes runtime configuration, so one image serves every environment |
-| UI calls go through the router | `mgr` is a client of the public `/v1` API only: it inherits routing, rate limits, metering, stale-route handling and move behaviour, and has no access to databases, the control plane or `/internal/*` |
-| Tenant identity in the UI | From the session, never the browser: a signed cookie after a dev sign-in locally, an OIDC token with a tenant claim (Cognito) in production; `mgr` sets `X-Tenant-ID` |
+| UI delivery | Each of `web-ui` and `mgr` is independently deployable: own CI path filters, semantic version and image tag (`<version>-<commit>`). `web-ui` is its own Argo CD Application outside the platform release; `mgr` has its own pipeline rolling out cell by cell (canary cell, bake, alarms, automatic rollback), with its version in the per-environment versions file. `make deploy-web-ui` / `make deploy-mgr` locally. Coupling is replaced by contracts: `mgr` pins the gateway `/v1` API it uses with contract tests; its GraphQL schema changes additively (cells can run different `mgr` versions during a wave) and a schema check rejects breaking changes; `web-ui` takes runtime configuration |
+| UI calls go through the router | `/graphql` reaches a cell like any request: the router routes and rate-limits it per tenant, so one tenant can't exhaust another's UI capacity, and stale routes, moves and freezes behave as for the API. Inside the cell, `mgr` reaches tenant data only through its gateway's `/v1` API, which adds the stack credential; `mgr` has no database, no stack credentials and no access to the control plane or `/internal/*` |
+| Tenant identity in the UI | From a verified session, never the browser: an OIDC token with a tenant claim (Cognito in production; a development-only identity provider stand-in locally) in an `HttpOnly`, `SameSite=Strict` cookie. The router verifies its signature with the provider's public keys and sets `X-Tenant-ID` (`401` without a valid session): token checking, not business logic, so the router stays the thinnest layer |
 | UI GraphQL client | urql: small, with a document cache that refetches after mutations; Graphcache can be added later |
 | Front-end package manager | pnpm, version pinned via Corepack |
 | Audit log | Control-plane table of every admin change and move step (actor, action, tenant, cell, outcome, detail, time), newest first via `GET /v1/audit` with cursor pagination. CloudWatch Logs copy on AWS (stage 6) |
