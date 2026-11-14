@@ -124,6 +124,8 @@ CELL LIFECYCLE
   cellctl cells set-capacity <cell-id> <N>
   cellctl cells decommission <cell-id> [--delete-data]
   cellctl cells register <cell-id> <url> [--credential C] [--capacity N] [--type T] [--size S] [--wave N]
+  cellctl cells drain <cell-id>
+  cellctl cells consolidate <cell-id> [--delete-data]
 
 TENANT LIFECYCLE
   cellctl tenants create <tenant-id> [--name NAME] [--tier standard|premium]
@@ -131,6 +133,8 @@ TENANT LIFECYCLE
   cellctl tenants list
   cellctl tenants get <tenant-id>
   cellctl tenants move <tenant-id> [--to CELL]
+  cellctl tenants promote <tenant-id> [--cell CELL] [--size S]
+  cellctl tenants demote <tenant-id> [--delete-data]
 
 MOVES AND AUDIT LOG
   cellctl moves list [--tenant T]
@@ -269,6 +273,24 @@ The tenant keeps its users, orders and IDs; cursors and `Idempotency-Key`s from 
 - **If the old cell can't drop its copy,** the move still completes, flagged `cleanup_pending`. Retry with `cellctl moves complete <move-id>`.
 
 See [docs/plan.md §5](docs/plan.md).
+
+### Dedicated cells, draining and consolidating
+
+All four run the move above, one tenant at a time.
+
+```powershell
+cellctl tenants promote acme              # deploys cell-acme (dedicated, capacity 1) and moves acme there
+cellctl tenants demote acme               # back to a shared cell; cell-acme is stopped (--delete-data removes it)
+cellctl cells drain cell-1                # no new tenants on cell-1; its tenants move to other cells
+cellctl cells consolidate cell-3          # drain cell-3, then decommission it
+```
+
+- **A dedicated cell holds exactly one tenant.** It always has capacity 1, and new tenants are never placed on it. A tenant on one shows `placement_mode: dedicated`; after a demote it shows `pooled` again.
+- **A failed promote removes the new cell again,** and the tenant stays where it was.
+- **Drain and consolidate check for room first.** If the other cells can't take every tenant, they refuse before moving anything.
+- **If one move fails during a drain,** that tenant is rolled back and the drain stops. Run the drain again to move the rest.
+
+See [docs/plan.md §5.1](docs/plan.md).
 
 ### Audit log
 

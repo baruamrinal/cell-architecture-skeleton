@@ -329,15 +329,23 @@ class ControlPlaneStore:
         return self._require_move(move_id)
 
     def end_move(
-        self, move: dict[str, Any], actor: str, *, state: str, cell_id: str, **fields: Any
+        self,
+        move: dict[str, Any],
+        actor: str,
+        *,
+        state: str,
+        cell_id: str,
+        placement_mode: str | None = None,
+        **fields: Any,
     ) -> dict[str, Any]:
         """Switch or roll back: the tenant is ``active`` on ``cell_id`` again."""
         now = utcnow()
         with connect(self._db_path) as conn:
             conn.execute(
-                "UPDATE tenants SET cell_id = ?, status = 'active', updated_at = ?, "
+                "UPDATE tenants SET cell_id = ?, status = 'active', "
+                "placement_mode = COALESCE(?, placement_mode), updated_at = ?, "
                 "updated_by = ? WHERE tenant_id = ?",
-                (cell_id, now, actor, move["tenant_id"]),
+                (cell_id, placement_mode, now, actor, move["tenant_id"]),
             )
         return self.update_move(str(move["move_id"]), actor, state=state, **fields)
 

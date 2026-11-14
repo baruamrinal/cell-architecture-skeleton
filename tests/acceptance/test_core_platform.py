@@ -73,7 +73,7 @@ def test_a4_draining_disabled_and_dedicated_cells_are_not_used_for_pooled_tenant
     platform: Platform,
 ) -> None:
     platform.register_cell("cell-1")
-    platform.register_cell("cell-2", type="dedicated")
+    platform.register_cell("cell-2", type="dedicated", capacity=1)  # one tenant (A70)
     platform.set_cell_status("cell-1", "draining")
 
     assert platform.create_tenant("acme").status_code == 503

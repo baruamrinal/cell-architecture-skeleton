@@ -209,7 +209,12 @@ class MoveProcedure:
         except Exception as exc:
             raise _cell_unavailable(target, exc) from exc
         log.info("tenant %s now served by %s", move["tenant_id"], target)
-        return self._store.end_move(move, actor, state="switched", cell_id=target)
+        # A tenant alone on a dedicated cell is dedicated; on a shared cell, pooled.
+        cell = self._store.get_cell(target) or {}
+        mode = "dedicated" if cell.get("type") == "dedicated" else "pooled"
+        return self._store.end_move(
+            move, actor, state="switched", cell_id=target, placement_mode=mode
+        )
 
     async def complete(self, move_id: str, actor: str) -> dict[str, Any]:
         move = self.require(move_id)

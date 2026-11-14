@@ -213,6 +213,15 @@ class PlatformStatus(BaseModel):
 TenantId = Annotated[str, Path(pattern=TENANT_ID_PATTERN)]
 
 
+DEDICATED_CAPACITY = 1  # one tenant per dedicated cell (docs/plan.md §3.3)
+
+
+def _dedicated_capacity_error() -> ApiError:
+    return ApiError(
+        422, "dedicated_capacity", "a dedicated cell holds exactly one tenant: capacity 1"
+    )
+
+
 def _cell_unavailable(cell_id: str, exc: Exception) -> ApiError:
     log.warning("cell %s call failed: %s", cell_id, exc)
     return ApiError(502, "cell_unavailable", f"cell {cell_id} did not complete the request")
@@ -293,6 +302,9 @@ def create_app(
     async def _register_cell(body: CellRegistration, actor: str) -> Cell:
         if store.get_cell(body.cell_id) is not None:
             raise ApiError(409, "cell_exists", f"cell {body.cell_id} already exists")
+        dedicated = body.type == "dedicated"
+        if dedicated and body.capacity not in (None, DEDICATED_CAPACITY):
+            raise _dedicated_capacity_error()
         credential = body.credential or credentials.get(body.cell_id)
         if not credential:
             raise ApiError(
@@ -314,7 +326,9 @@ def create_app(
                 type=body.type,
                 hosting=body.hosting,
                 size=body.size,
-                capacity=body.capacity or settings.default_cell_capacity,
+                capacity=DEDICATED_CAPACITY
+                if dedicated
+                else body.capacity or settings.default_cell_capacity,
                 wave=body.wave,
                 actor=actor,
             )
@@ -339,6 +353,8 @@ def create_app(
         with audit.record("cell.update", actor, cell_id=cell_id, **changes):
             cell = require_cell(cell_id)
             tenants = int(str(cell["tenant_count"])) + int(str(cell["incoming_tenants"]))
+            if cell["type"] == "dedicated" and body.capacity not in (None, DEDICATED_CAPACITY):
+                raise _dedicated_capacity_error()
             if body.capacity is not None and body.capacity < tenants:
                 raise ApiError(
                     409,

@@ -8,7 +8,7 @@ onboarding steps `cellctl tenants create` runs.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from cellarch.cli.api import Api
+from cellarch.cli.cellctl import main as cellctl_main
 from cellarch.cli.clusters import ClusterError
 from cellarch.cli.moves import move
 from cellarch.cli.onboarding import offboard, onboard
@@ -75,10 +76,12 @@ class InProcessStacks:
         platform: Platform,
         *,
         fail_install_on: str | None = None,
+        fail_tenant: str | None = None,
         after_install: Callable[[str, str], None] | None = None,
     ) -> None:
         self.platform = platform
         self.fail_install_on = fail_install_on
+        self.fail_tenant = fail_tenant
         self.after_install = after_install
 
     def cell_ids(self) -> list[str]:
@@ -88,7 +91,7 @@ class InProcessStacks:
         self, short: str, release: str, chart: Path, values: dict[str, Any], **kw: Any
     ) -> None:
         tenant_id = values["tenantId"]
-        if short == self.fail_install_on:
+        if short == self.fail_install_on or tenant_id == self.fail_tenant:
             raise ClusterError(f"helm install {release} failed on {short}")
         secret = self.platform.cell_secrets[short].values[tenant_id]
         self.platform.stacks.start(short, tenant_id, secret)
@@ -97,6 +100,52 @@ class InProcessStacks:
 
     def helm_uninstall(self, short: str, release: str) -> None:
         self.platform.stacks.stop(short, release.removeprefix("tenant-"))
+
+
+class PlatformClusters(InProcessStacks):
+    """k3d + Helm for the whole platform: the cell chart starts a real in-process cell
+    in a free address slot, the tenant-stack chart a tenant's stack."""
+
+    def __init__(self, platform: Platform, **kwargs: Any) -> None:
+        super().__init__(platform, **kwargs)
+        self.calls: list[tuple[str, str]] = []
+
+    def clusters(self) -> dict[str, str]:
+        return {"platform": "running", **dict.fromkeys(self.cell_ids(), "running")}
+
+    def ensure_cluster(self, short: str, **kwargs: Any) -> None:
+        self.calls.append(("cluster", short))
+
+    def import_images(self, short: str, images: Any) -> None:
+        pass
+
+    def helm_upgrade(
+        self, short: str, release: str, chart: Path, values: Mapping[str, Any], **kw: Any
+    ) -> None:
+        if chart.name == "cell":
+            self.platform.start_cell(values["cellId"], values["secrets"]["internalToken"])
+            return
+        super().helm_upgrade(short, release, chart, dict(values), **kw)
+
+    def ensure_network(self) -> None:
+        pass
+
+    def delete_network(self) -> None:
+        pass
+
+    def node_ip(self, short: str) -> str:
+        return "172.20.0.9"
+
+    def set_cell_dns(self, entries: Any) -> bool:
+        return True
+
+    def stop(self, short: str) -> None:
+        self.calls.append(("stop", short))
+        self.platform.stop_cell(short)
+
+    def delete(self, short: str) -> None:
+        self.calls.append(("delete", short))
+        self.platform.stop_cell(short)
 
 
 @dataclass
@@ -225,6 +274,16 @@ class Platform:
             tenant_id,
             to,
             progress=_quiet,
+            sleep=_quiet,
+        )
+
+    def cellctl(self, *args: str, clusters: PlatformClusters | None = None) -> int:
+        """Run a cellctl command against this platform."""
+        return cellctl_main(
+            ["--charts-dir", str(CHARTS), *args],
+            client=self.admin,
+            token=ADMIN_TOKEN,
+            clusters=clusters or PlatformClusters(self),
             sleep=_quiet,
         )
 
