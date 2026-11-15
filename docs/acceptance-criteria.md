@@ -162,3 +162,12 @@ Operations built on the move procedure (docs/plan.md §5.1).
 | A84 | a signed-in tenant | the control plane is down | its UI queries and mutations keep working from the router's cached route |
 | A85 | a tenant being moved to another cell | it uses the UI during and after the move | during the move queries work and mutations get `tenant_migrating` with `Retry-After`; after the switch it is served by the new cell's `mgr` with its data |
 | A86 | `mgr`'s GraphQL schema and its use of `/v1` | the schema or the tenant services change | the committed schema must match the code, a breaking change against the published schema is detected, and contract tests pin every `/v1` call `mgr` makes |
+
+### web-ui: the tenant web UI
+
+`web-ui` is the static front end, a platform service released on its own; every tenant reaches it on its own address (docs/plan.md §2.4).
+
+| ID | Given | When | Then |
+|---|---|---|---|
+| A87 | the platform with the web UI installed | a browser opens a tenant's own address (`acme.localhost:8080`, `acme.platform.com`) | `/` serves the UI, and on the same address `/graphql`, `/v1` and `/_router` go to the router and `/auth` to the identity provider; the UI's pods accept traffic only from the edge and make no outbound calls (needs `helm`) |
+| A88 | the web UI, with mgr faked at the network boundary | its screens are used | a signed-out visitor is asked to sign in for the address's tenant; signed in, it shows the tenant's users and orders, pages through them, explains refusals (rate limit, tenant being moved, busy or unavailable service) and sends every change as a POST with the anti-CSRF header, creates with an idempotency key (runs the front end's Vitest suite; needs Node 24 and the installed packages) |

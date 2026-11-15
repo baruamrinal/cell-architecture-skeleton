@@ -44,6 +44,12 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["scripts", "scripts/ci"]
 addopts = "-q --strict-markers"
+# Slow groups, skipped by `make test-fast` (CI always runs everything).
+markers = [
+    "charts: renders Helm charts (needs helm)",
+    "postgres: uses a real Postgres server (needs POSTGRES_URL)",
+    "frontend: runs the web UI's Vitest suite (needs Node 24)",
+]
 
 [tool.coverage.run]
 branch = true

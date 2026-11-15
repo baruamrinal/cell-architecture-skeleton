@@ -96,6 +96,8 @@ def root(tmp_path: Path) -> Path:
     mgr = tmp_path / "src" / "cellarch" / "mgr"
     mgr.mkdir(parents=True)
     (mgr / "__init__.py").write_text('"""mgr."""\n\n__version__ = "0.4.2"\n')
+    (tmp_path / "web-ui").mkdir()
+    (tmp_path / "web-ui" / "package.json").write_text('{"name": "ui", "version": "0.7.0"}')
     return tmp_path
 
 
@@ -105,6 +107,7 @@ def clean_git(cmd: Sequence[str]) -> str:
 
 
 MGR_TAG = "0.4.2-abc1234"
+WEB_UI_TAG = "0.7.0-abc1234"
 
 
 def make_venv(root: Path) -> Path:
@@ -255,7 +258,7 @@ class TestUp:
         )
         assert clusters.calls[2] == ("cluster", "cell-1", ())
         builds = [c for c in run.commands if c[:2] == ["docker", "build"]]
-        assert [c[3] for c in builds] == [*dev.IMAGES, "mgr"]
+        assert [c[3] for c in builds] == [*dev.IMAGES, "mgr", "web-ui"]
         assert (
             "import",
             "platform",
@@ -286,6 +289,7 @@ class TestUp:
         assert platform["edge"] == {
             "enabled": True,
             "service": {"type": "LoadBalancer", "port": 8080},
+            "webUiUrl": "http://web-ui:8080",
         }
         assert platform["sessions"]["baseDomain"] == "localhost"
         assert platform["controlPlane"]["service"] == {"type": "LoadBalancer", "port": 8000}
@@ -311,7 +315,31 @@ class TestUp:
         idp = next(c for c in clusters.calls if c[:3] == ("helm", "platform", "dev-idp"))
         assert idp[3] == "dev-idp"
         assert idp[4]["baseDomain"] == "localhost"
-        assert dev.read_versions(root) == {"mgr": MGR_TAG}
+        assert dev.read_versions(root) == {"mgr": MGR_TAG, "web-ui": WEB_UI_TAG}
+
+    def test_installs_the_web_ui_in_the_platform_cluster(self, root: Path) -> None:
+        make_venv(root)
+        clusters, run = FakeClusters(), FakeRunner()
+
+        assert up(root, clusters, run) == 0
+
+        build = [
+            "docker",
+            "build",
+            "--target",
+            "web-ui",
+            "-t",
+            f"cellarch/web-ui:{WEB_UI_TAG}",
+            str(root),
+        ]
+        assert build in run.commands
+        assert ("import", "platform", (f"cellarch/web-ui:{WEB_UI_TAG}",)) in clusters.calls
+        web_ui = clusters.helm("platform", "web-ui")
+        assert web_ui[3:] == ("web-ui", {"image": {"tag": WEB_UI_TAG}}, False)
+        assert dev.read_versions(root)["web-ui"] == WEB_UI_TAG
+        # The edge sends / to it only once it is installed.
+        order = [c for c in clusters.calls if c[0] == "helm" and c[1] == "platform"]
+        assert [c[2] for c in order] == ["dev-idp", "web-ui", "cellarch"]
 
     def test_mgr_from_a_changed_working_tree_gets_a_fresh_tag(self, root: Path) -> None:
         make_venv(root)
@@ -461,6 +489,48 @@ class TestDeployMgr:
         assert dev.read_versions(root) == {"mgr": "1.0.1-c", "user-account": "2.0.0-b"}
 
 
+class TestDeployWebUi:
+    """`make deploy-web-ui`: ship the web UI alone, without `make up`."""
+
+    def test_builds_and_upgrades_only_the_web_ui(self, root: Path) -> None:
+        make_venv(root)
+        clusters = FakeClusters({"platform": "running", "cell-1": "running"})
+        run = FakeRunner()
+
+        assert up(root, clusters, run, target="deploy-web-ui") == 0
+
+        builds = [c for c in run.commands if c[:2] == ["docker", "build"]]
+        assert builds == [
+            [
+                "docker",
+                "build",
+                "--target",
+                "web-ui",
+                "-t",
+                f"cellarch/web-ui:{WEB_UI_TAG}",
+                str(root),
+            ]
+        ]
+        assert [c for c in clusters.calls if c[0] == "helm"] == [
+            ("helm", "platform", "web-ui", "web-ui", {"image": {"tag": WEB_UI_TAG}}, False)
+        ]
+        assert dev.read_versions(root) == {"web-ui": WEB_UI_TAG}
+
+    def test_needs_a_running_platform_and_stops_on_a_failed_build(self, root: Path) -> None:
+        make_venv(root)
+        assert up(root, FakeClusters({"platform": "stopped"}), target="deploy-web-ui") == 1
+        running = FakeClusters({"platform": "running"})
+        assert up(root, running, FakeRunner(fail_on="web-ui"), target="deploy-web-ui") == 1
+        assert not any(c[0] == "helm" for c in running.calls)
+
+    def test_a_package_json_without_a_version_is_an_error(self, root: Path) -> None:
+        from cellarch.cli.versions import package_version
+
+        (root / "p.json").write_text('{"name": "x"}')
+        with pytest.raises(ValueError, match="version"):
+            package_version(root / "p.json")
+
+
 class TestOtherTargets:
     def call(self, target: str, root: Path, clusters: FakeClusters, run: FakeRunner) -> int:
         return dev.main(
@@ -491,7 +561,7 @@ class TestOtherTargets:
     def test_build_only_builds(self, root: Path) -> None:
         clusters, run = FakeClusters(), FakeRunner()
         assert self.call("build", root, clusters, run) == 0
-        assert [c[3] for c in run.commands] == [*dev.IMAGES, "mgr"]
+        assert [c[3] for c in run.commands] == [*dev.IMAGES, "mgr", "web-ui"]
         assert clusters.calls == []
 
     def test_status_test_and_setup(self, root: Path) -> None:
@@ -501,6 +571,15 @@ class TestOtherTargets:
         assert run.commands[-1][1:] == ["-m", "cellarch.cli.cellctl", "status"]
         assert self.call("test", root, FakeClusters(), run) == 0
         assert run.commands[-1][1:] == ["-m", "pytest", "--cov"]
+        assert self.call("test-fast", root, FakeClusters(), run) == 0
+        assert run.commands[-1][1:] == [
+            "-m",
+            "pytest",
+            "-m",
+            "not charts and not postgres and not frontend",
+            "-p",
+            "no:cacheprovider",
+        ]
         assert self.call("setup", root, FakeClusters(), run) == 0
         assert run.commands[-1][-1] == ".[dev]"
 

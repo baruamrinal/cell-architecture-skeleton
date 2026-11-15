@@ -1,0 +1,8 @@
+{
+  "graphqlPath": "/graphql",
+  "signIn": {
+    "provider": "dev",
+    "signInUrl": "/auth/dev/sign-in",
+    "signOutUrl": "/auth/sign-out"
+  }
+}

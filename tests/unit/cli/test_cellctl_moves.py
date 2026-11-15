@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from cellarch.cli.cellctl import main
 from cellarch.control_plane.app import ControlPlaneSettings, create_app
+from tests.fakes import async_client
 
 from ..control_plane.test_moves import ADMIN, ScriptedCells, cell_error
 from .test_onboarding import RecordingClusters
@@ -33,7 +34,7 @@ def control_plane(tmp_path: Path, cells: ScriptedCells) -> Iterator[TestClient]:
             router_token="router-t",
             cell_credentials={"cell-1": "cell-1-credential", "cell-2": "cell-2-credential"},
         ),
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(cells.handler)),
+        http_client=async_client(transport=httpx.MockTransport(cells.handler)),
     )
     with TestClient(app, base_url="http://cp", headers=ADMIN) as client:
         for cell_id in ("cell-1", "cell-2"):

@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from cellarch.cli.cellctl import main
 from cellarch.cli.clusters import ClusterError
 from cellarch.control_plane.app import ControlPlaneSettings, create_app
+from tests.fakes import async_client
 
 from ..control_plane.test_cell_lifecycle_unit import fake_cells
 
@@ -28,7 +29,7 @@ def control_plane(tmp_path: Path) -> Iterator[TestClient]:
             router_token="router-t",
             cell_credentials={"cell-1": "c1"},
         ),
-        http_client=httpx.AsyncClient(
+        http_client=async_client(
             transport=httpx.MockTransport(fake_cells({"cell-1": "c1", "cell-3": CELL_3_TOKEN}))
         ),
     )

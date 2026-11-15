@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import ssl
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
@@ -24,6 +26,15 @@ from cellarch.services.common.settings import ServiceSettings
 from cellarch.services.order_processing.app import OrderSettings
 from cellarch.services.order_processing.app import create_app as create_order_processing
 from cellarch.services.user_account.app import create_app as create_user_account
+
+# Building a TLS context loads the system's CA bundle: about half a second per client
+# on Windows. Tests never open real TLS connections, so every test client shares one.
+_TLS = ssl.create_default_context()
+
+
+def async_client(**kwargs: Any) -> httpx.AsyncClient:
+    """An httpx.AsyncClient for tests, without building its own TLS context."""
+    return httpx.AsyncClient(verify=_TLS, **kwargs)
 
 
 class MemorySecrets:
@@ -56,7 +67,7 @@ class StackHost:
         self.down: set[str] = set()  # tenants whose stack is unreachable
 
     def client(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(transport=httpx.ASGITransport(app=self))
+        return async_client(transport=httpx.ASGITransport(app=self))
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         headers = dict(scope.get("headers", []))

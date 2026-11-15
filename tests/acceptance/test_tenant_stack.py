@@ -23,6 +23,7 @@ from cellarch.services.common.settings import ServiceSettings
 from cellarch.services.order_processing.app import OrderSettings
 from cellarch.services.order_processing.app import create_app as create_order_processing
 from cellarch.services.user_account.app import create_app as create_user_account
+from tests.fakes import async_client
 
 from .conftest import Switch
 
@@ -62,9 +63,7 @@ def stack(database_url: str) -> Iterator[Stack]:
     user_account = Switch(create_user_account(ServiceSettings(**common)))
     order_processing = create_order_processing(
         OrderSettings(**common, user_account_url=USER_ACCOUNT_URL),
-        http_client=httpx.AsyncClient(
-            mounts={USER_ACCOUNT_URL: httpx.ASGITransport(app=user_account)}
-        ),
+        http_client=async_client(mounts={USER_ACCOUNT_URL: httpx.ASGITransport(app=user_account)}),
     )
     headers = {INTERNAL_TOKEN_HEADER: STACK_TOKEN, TENANT_HEADER: "acme"}
     with (

@@ -12,6 +12,7 @@ from cellarch.services.common.settings import ServiceSettings
 from cellarch.services.order_processing.app import OrderSettings
 from cellarch.services.order_processing.app import create_app as create_orders
 from cellarch.services.user_account.app import create_app as create_users
+from tests.fakes import async_client
 
 HEADERS = {INTERNAL_TOKEN_HEADER: "tok", TENANT_HEADER: "acme"}
 
@@ -26,7 +27,7 @@ def orders_client(tmp_path: Path, handler: httpx.MockTransport) -> TestClient:
         OrderSettings(
             "acme", "tok", sqlite_url(tmp_path / "acme.db"), user_account_url="http://ua"
         ),
-        http_client=httpx.AsyncClient(transport=handler),
+        http_client=async_client(transport=handler),
     )
     return TestClient(app, headers=HEADERS)
 

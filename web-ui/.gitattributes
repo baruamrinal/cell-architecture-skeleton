@@ -1,0 +1,3 @@
+# Generated GraphQL types match queries by their exact text: keep LF line endings
+# everywhere, so a Windows checkout produces the same text.
+* text=auto eol=lf

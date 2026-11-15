@@ -22,6 +22,7 @@ from cellarch.data_plane.router.routing import (
     TenantNotFoundError,
     TenantResolver,
 )
+from tests.fakes import async_client
 
 
 class FakeClock:
@@ -78,7 +79,7 @@ def resolver(handler: Handler, clock: FakeClock | None = None) -> tuple[TenantRe
         assert request.headers[INTERNAL_TOKEN_HEADER] == "router-t"
         return handler(request)
 
-    http = httpx.AsyncClient(transport=httpx.MockTransport(recording))
+    http = async_client(transport=httpx.MockTransport(recording))
     cache = RoutingCache(ttl_seconds=5, clock=clock or FakeClock())
     return TenantResolver(http, "http://cp", "router-t", cache), calls
 
@@ -180,7 +181,7 @@ def router_client(cp: Handler, cell: Handler) -> TestClient:
 
     app = create_app(
         RouterSettings(control_plane_url="http://cp", router_token="router-t"),
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(dispatch)),
+        http_client=async_client(transport=httpx.MockTransport(dispatch)),
     )
     return TestClient(app)
 
@@ -309,7 +310,7 @@ class TestWebUiSessions:
                 session_jwks_url="http://idp/auth/.well-known/jwks.json",
                 session_issuer="http://idp",
             ),
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(dispatch)),
+            http_client=async_client(transport=httpx.MockTransport(dispatch)),
         )
         response = TestClient(app).get(
             "/graphql",
