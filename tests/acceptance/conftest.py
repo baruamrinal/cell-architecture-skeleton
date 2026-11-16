@@ -62,7 +62,12 @@ def mgr_host(cell_id: str) -> str:
 
 
 def make_cell(
-    tmp_path: Path, cell_id: str, token: str, stacks: StackHost, secrets: MemorySecrets
+    tmp_path: Path,
+    cell_id: str,
+    token: str,
+    stacks: StackHost,
+    secrets: MemorySecrets,
+    cell_type: str = "shared",
 ) -> Any:
     """A cell gateway with its own folder (like its volume) and database server."""
     folder = tmp_path / cell_id
@@ -75,6 +80,7 @@ def make_cell(
             tenant_service_url=stack_url_template(cell_id),
             mgr_url=f"http://{mgr_host(cell_id)}",
             mgr_token=mgr_token(cell_id),
+            cell_type=cell_type,
         ),
         secrets=secrets,
         http_client=stacks.client(),
@@ -153,7 +159,11 @@ class PlatformClusters(InProcessStacks):
         self, short: str, release: str, chart: Path, values: Mapping[str, Any], **kw: Any
     ) -> None:
         if chart.name == "cell":
-            self.platform.start_cell(values["cellId"], values["secrets"]["internalToken"])
+            self.platform.start_cell(
+                values["cellId"],
+                values["secrets"]["internalToken"],
+                cell_type=values.get("cellType", "shared"),
+            )
             return
         if chart.name == "mgr":  # the in-process cell starts with its mgr (attach_mgr)
             self.calls.append(("mgr", short))
@@ -269,10 +279,12 @@ class Platform:
         result: dict[str, Any] = response.json()
         return result
 
-    def start_cell(self, cell_id: str, token: str) -> None:
-        """Start a real cell app in a spare address slot (what `docker compose up` does)."""
+    def start_cell(self, cell_id: str, token: str, cell_type: str = "shared") -> None:
+        """Start a real cell app in a spare address slot (what `helm install` does)."""
         secrets = self.cell_secrets.setdefault(cell_id, MemorySecrets())
-        self.cells[cell_id].app = make_cell(self.tmp_path, cell_id, token, self.stacks, secrets)
+        self.cells[cell_id].app = make_cell(
+            self.tmp_path, cell_id, token, self.stacks, secrets, cell_type
+        )
         self.cells[cell_id].reachable = True
         attach_mgr(self.stacks, cell_id, self.cells[cell_id])
 

@@ -25,6 +25,7 @@ query Users($first: Int, $after: String) {
   }
 }"""
 ME = "query { me { tenantId cellId } }"
+ME_AND_CELL = "query { me { tenantId status cell { id type region } } }"
 USER = "query User($id: ID!) { user(id: $id) { id email } }"
 ORDER = "query Order($id: ID!) { order(id: $id) { id userId } }"
 CREATE_USER = """

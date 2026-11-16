@@ -20,6 +20,11 @@ from tests.fakes import async_client
 TOKEN = "gateway-to-mgr"
 FROM_GATEWAY = {INTERNAL_TOKEN_HEADER: TOKEN, TENANT_HEADER: "acme"}
 USER = {"id": "usr_1", "email": "a@x.test", "name": "A", "created_at": "t"}
+PROFILE = {
+    "tenant_id": "acme",
+    "status": "moving",
+    "cell": {"id": "cell-1", "type": "dedicated", "region": "eu-west-1"},
+}
 
 
 def order(order_id: str, user_id: str = "usr_1") -> dict[str, Any]:
@@ -57,6 +62,8 @@ class Gateway:
             many = len(request.url.params.get_list("user_id")) > 1
             next_cursor = "c" if many and self.orders_truncated else None
             return httpx.Response(200, json={"items": self.orders, "next_cursor": next_cursor})
+        if key == "GET /v1/tenant":
+            return httpx.Response(200, json=PROFILE)
         if key.startswith("GET /v1/users/"):
             return httpx.Response(200, json=USER)
         if key == "GET /v1/orders/ord_1":
@@ -300,3 +307,29 @@ def test_inline_response_schemas_are_read_too() -> None:
     from cellarch.mgr.contract import _fields
 
     assert _fields({}, {"properties": {"a": {}, "b": {}}}) == {"a", "b"}
+
+
+class TestMe:
+    def test_the_tenant_and_its_cell_come_from_one_gateway_call(self, gateway: Gateway) -> None:
+        c = client(gateway)
+        doc = "query { me { tenantId cellId status cell { id type region } } }"
+        assert get(c, doc).json()["data"]["me"] == {
+            "tenantId": "acme",
+            "cellId": "cell-1",
+            "status": "MOVING",
+            "cell": {"id": "cell-1", "type": "DEDICATED", "region": "eu-west-1"},
+        }
+        assert [r.url.path for r in gateway.requests].count("/v1/tenant") == 1
+
+    def test_me_without_the_cell_needs_no_gateway_call(self, gateway: Gateway) -> None:
+        assert get(client(gateway), "query { me { tenantId cellId } }").status_code == 200
+        assert "/v1/tenant" not in [r.url.path for r in gateway.requests]
+
+    def test_a_gateway_refusal_becomes_a_graphql_error(self, gateway: Gateway) -> None:
+        gateway.answers["GET /v1/tenant"] = httpx.Response(
+            503,
+            json={"error": "tenant_not_ready", "message": "being set up"},
+            headers={"Retry-After": "1"},
+        )
+        response = get(client(gateway), "query { me { status } }")
+        assert code(response) == "tenant_not_ready"

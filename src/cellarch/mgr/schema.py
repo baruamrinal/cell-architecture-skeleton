@@ -12,8 +12,10 @@ Regenerate it with ``python -m cellarch.mgr.schema > src/cellarch/mgr/schema.gra
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 import strawberry
@@ -34,6 +36,15 @@ class Context:
     tenant_id: str
     cell_id: str
     loaders: dict[str, DataLoader[Any, Any]] = field(default_factory=dict)
+    # The tenant's profile from the gateway, fetched once per request when asked for.
+    profile: asyncio.Future[Any] | None = None
+
+
+async def _profile(context: Context) -> dict[str, Any]:
+    if context.profile is None:
+        context.profile = asyncio.ensure_future(context.gateway.call("GET", "/v1/tenant"))
+    result: dict[str, Any] = await context.profile
+    return result
 
 
 def _bounded(value: int, maximum: int, name: str) -> int:
@@ -99,10 +110,38 @@ class OrderPage:
     next_cursor: str | None
 
 
+@strawberry.enum
+class TenantStatus(Enum):
+    ACTIVE = "active"
+    MOVING = "moving"  # being moved to another cell: reads only until it is done
+
+
+@strawberry.enum
+class CellType(Enum):
+    SHARED = "shared"
+    DEDICATED = "dedicated"
+
+
+@strawberry.type
+class Cell:
+    id: str
+    type: CellType
+    region: str
+
+
 @strawberry.type
 class Me:
     tenant_id: str
     cell_id: str
+
+    @strawberry.field
+    async def status(self, info: Info[Context, None]) -> TenantStatus:
+        return TenantStatus((await _profile(info.context))["status"])
+
+    @strawberry.field
+    async def cell(self, info: Info[Context, None]) -> Cell:
+        cell = (await _profile(info.context))["cell"]
+        return Cell(id=cell["id"], type=CellType(cell["type"]), region=cell["region"])
 
 
 @strawberry.input

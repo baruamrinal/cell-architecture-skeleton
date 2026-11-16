@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { describe as describeProblem, isSignedOut, newIdempotencyKey } from "./client";
 import { DEFAULT_CONFIG, loadConfig, tenantFromHost } from "./config";
-import { explain, formatCents, parseCents } from "./format";
+import { explain, formatCents, formatDate, parseCents } from "./format";
 
 describe("config", () => {
   it("merges /config.json over the defaults", async () => {
@@ -77,5 +77,15 @@ describe("money", () => {
 
   it("formats cents", () => {
     expect(formatCents(2500)).toBe("$25.00");
+  });
+});
+
+describe("formatDate", () => {
+  it("shows a timestamp as a short date", () => {
+    expect(formatDate("2026-11-14T10:00:00Z")).toBe("14 Nov 2026");
+  });
+
+  it("leaves anything that isn't a timestamp as it is", () => {
+    expect(formatDate("soon")).toBe("soon");
   });
 });

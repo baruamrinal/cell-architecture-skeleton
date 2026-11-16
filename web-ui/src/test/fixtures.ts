@@ -4,7 +4,17 @@ import { graphql as gql } from "msw/graphql";
 /** mgr's GraphQL endpoint on this tenant's host (as the browser calls it). */
 export const graphql = gql.link("http://acme.localhost:8080/graphql");
 
-export const ME = { tenantId: "acme", cellId: "cell-1" };
+export const ME = {
+  tenantId: "acme",
+  cellId: "cell-1",
+  status: "ACTIVE",
+  cell: { id: "cell-1", type: "SHARED", region: "local" },
+};
+
+/** The signed-in tenant with some of its profile changed (e.g. while it is moved). */
+export function me(changes: Partial<typeof ME> = {}) {
+  return { ...ME, ...changes };
+}
 
 export function user(id: string, email = `${id}@acme.test`) {
   return {

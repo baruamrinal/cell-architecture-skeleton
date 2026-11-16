@@ -1,6 +1,8 @@
 # One cell, in its own cluster. Install once per cell cluster.
 
 cellId: ""                      # required, e.g. cell-1
+cellType: shared                # shared | dedicated, as registered with the control plane
+region: local                   # where the cell runs (its AWS region in production)
 
 image:
   repository: cellarch          # images are <repository>/<component>:<tag>

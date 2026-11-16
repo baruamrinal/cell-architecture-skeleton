@@ -79,7 +79,11 @@ def deploy_cell(
         clusters.ensure_cluster(cell_id)
         clusters.import_images(cell_id, [image, *TENANT_IMAGES])
         progress("Installing the cell chart and waiting until the gateway is ready...")
-        values = {"cellId": cell_id, "secrets": {"internalToken": credential}}
+        values = {
+            "cellId": cell_id,
+            "cellType": body.get("type", "shared"),
+            "secrets": {"internalToken": credential},
+        }
         clusters.helm_upgrade(cell_id, CELL_RELEASE, chart, values)
         sync_cell_dns(clusters)
         install_mgr(clusters, charts_dir, cell_id, progress)

@@ -136,3 +136,19 @@ def test_the_api_is_scheduled_before_the_ui() -> None:
     assert classes["cellarch-api"] > classes["cellarch-ui"]
     pod = find(objects, "Deployment", "gateway")["spec"]["template"]["spec"]
     assert pod["priorityClassName"] == "cellarch-api"
+
+
+def test_the_cells_type_and_region_reach_the_gateway() -> None:
+    (container,) = containers(render("cell", REQUIRED))
+    assert (env(container)["CELL_TYPE"], env(container)["CELL_REGION"]) == ("shared", "local")
+    values = {**REQUIRED, "cellType": "dedicated", "region": "eu-west-1"}
+    (container,) = containers(render("cell", values))
+    assert (env(container)["CELL_TYPE"], env(container)["CELL_REGION"]) == (
+        "dedicated",
+        "eu-west-1",
+    )
+
+
+def test_an_unknown_cell_type_is_refused() -> None:
+    with pytest.raises(RenderError, match="cellType"):
+        render("cell", {**REQUIRED, "cellType": "huge"})

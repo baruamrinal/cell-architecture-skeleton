@@ -6,6 +6,14 @@ export function formatCents(cents: number): string {
   return MONEY.format(cents / 100);
 }
 
+const DAY = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+
+/** "2026-11-14T10:00:00Z" -> "14 Nov 2026"; anything else is shown as it came. */
+export function formatDate(timestamp: string): string {
+  const time = Date.parse(timestamp);
+  return Number.isNaN(time) ? timestamp : DAY.format(time);
+}
+
 /** "12.5" -> 1250; null for anything that isn't a non-negative amount with ≤ 2 decimals. */
 export function parseCents(text: string): number | null {
   const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(text.trim());
