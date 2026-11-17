@@ -13,7 +13,7 @@ client ──X-Tenant-ID──► router ──► cell-1  (app + own DB)   ← 
 
 It's a skeleton with an **enterprise design**: production differs only in how much is implemented, not in how it's structured. [docs/production-architecture.md](docs/production-architecture.md) shows how each local piece maps to AWS, plus high availability, disaster recovery, security, observability and cost.
 
-The full design is in [docs/plan.md](docs/plan.md): placement, rate limiting, tenant moves, seasonal cells, customer-hosted cells, AWS infrastructure, CI/CD and security guardrails.
+The full design is in [docs/plan.md](docs/plan.md): placement, rate limiting, tenant moves, seasonal cells, customer-hosted cells, AWS infrastructure, CI/CD and security guardrails. Operators manage the platform with `cellctl`; see the [cellctl user handbook](docs/cellctl-handbook.md).
 
 ## Status
 
@@ -112,7 +112,7 @@ Stop everything with `.\make down`. To also delete all data, run `.\make clean`.
 
 ## Admin CLI (`cellctl`)
 
-`cellctl` covers the whole lifecycle: deploying and managing **cells**, and onboarding and managing **tenants**. It's installed into the virtual environment by `pip install -e ".[dev]"`.
+`cellctl` covers the whole lifecycle: deploying and managing **cells**, and onboarding and managing **tenants**. It's installed into the virtual environment by `pip install -e ".[dev]"`. The **[cellctl user handbook](docs/cellctl-handbook.md)** describes every command with its options and an example, plus common workflows and what each error means.
 
 ### Setup
 
