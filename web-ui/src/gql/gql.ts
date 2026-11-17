@@ -14,7 +14,7 @@ import type { TypedDocumentNode as DocumentNode } from '@graphql-typed-document-
  * Learn more about it here: https://the-guild.dev/graphql/codegen/plugins/presets/preset-client#reducing-bundle-size
  */
 type Documents = {
-    "\n  query Me {\n    me {\n      tenantId\n      cellId\n    }\n  }\n": typeof types.MeDocument,
+    "\n  query Me {\n    me {\n      tenantId\n      cellId\n      status\n      cell {\n        id\n        type\n        region\n      }\n    }\n  }\n": typeof types.MeDocument,
     "\n  query Users($first: Int!, $after: String) {\n    users(first: $first, after: $after) {\n      items {\n        id\n        email\n        name\n        createdAt\n        orders(first: 5) {\n          id\n          status\n        }\n      }\n      nextCursor\n    }\n  }\n": typeof types.UsersDocument,
     "\n  query User($id: ID!) {\n    user(id: $id) {\n      id\n      email\n      name\n      createdAt\n    }\n    orders(userId: $id, first: 50) {\n      items {\n        id\n        status\n        totalCents\n        createdAt\n        lines {\n          sku\n          quantity\n          unitPriceCents\n        }\n      }\n      nextCursor\n    }\n  }\n": typeof types.UserDocument,
     "\n  query Orders($first: Int!, $after: String) {\n    orders(first: $first, after: $after) {\n      items {\n        id\n        userId\n        status\n        totalCents\n        createdAt\n      }\n      nextCursor\n    }\n  }\n": typeof types.OrdersDocument,
@@ -24,7 +24,7 @@ type Documents = {
     "\n  mutation CancelOrder($id: ID!) {\n    cancelOrder(id: $id) {\n      id\n      status\n    }\n  }\n": typeof types.CancelOrderDocument,
 };
 const documents: Documents = {
-    "\n  query Me {\n    me {\n      tenantId\n      cellId\n    }\n  }\n": types.MeDocument,
+    "\n  query Me {\n    me {\n      tenantId\n      cellId\n      status\n      cell {\n        id\n        type\n        region\n      }\n    }\n  }\n": types.MeDocument,
     "\n  query Users($first: Int!, $after: String) {\n    users(first: $first, after: $after) {\n      items {\n        id\n        email\n        name\n        createdAt\n        orders(first: 5) {\n          id\n          status\n        }\n      }\n      nextCursor\n    }\n  }\n": types.UsersDocument,
     "\n  query User($id: ID!) {\n    user(id: $id) {\n      id\n      email\n      name\n      createdAt\n    }\n    orders(userId: $id, first: 50) {\n      items {\n        id\n        status\n        totalCents\n        createdAt\n        lines {\n          sku\n          quantity\n          unitPriceCents\n        }\n      }\n      nextCursor\n    }\n  }\n": types.UserDocument,
     "\n  query Orders($first: Int!, $after: String) {\n    orders(first: $first, after: $after) {\n      items {\n        id\n        userId\n        status\n        totalCents\n        createdAt\n      }\n      nextCursor\n    }\n  }\n": types.OrdersDocument,
@@ -51,7 +51,7 @@ export function graphql(source: string): unknown;
 /**
  * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
  */
-export function graphql(source: "\n  query Me {\n    me {\n      tenantId\n      cellId\n    }\n  }\n"): (typeof documents)["\n  query Me {\n    me {\n      tenantId\n      cellId\n    }\n  }\n"];
+export function graphql(source: "\n  query Me {\n    me {\n      tenantId\n      cellId\n      status\n      cell {\n        id\n        type\n        region\n      }\n    }\n  }\n"): (typeof documents)["\n  query Me {\n    me {\n      tenantId\n      cellId\n      status\n      cell {\n        id\n        type\n        region\n      }\n    }\n  }\n"];
 /**
  * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
  */

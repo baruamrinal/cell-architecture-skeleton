@@ -1,5 +1,8 @@
 {{- $name := printf "%s-gateway" (include "cell.fullname" .) -}}
 {{- $cell := include "cell.id" . -}}
+{{- if not (has .Values.cellType (list "shared" "dedicated")) }}
+{{- fail "cellType must be shared or dedicated" }}
+{{- end }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -51,6 +54,11 @@ spec:
               value: {{ $cell | quote }}
             - name: CELL_DB_PATH
               value: "/data/{{ $cell }}.db"
+            # What the cell is (its inputs in cells.yaml); the tenant's UI shows it.
+            - name: CELL_TYPE
+              value: {{ .Values.cellType | quote }}
+            - name: CELL_REGION
+              value: {{ required "region is required" .Values.region | quote }}
             - name: CELL_INTERNAL_TOKEN
               valueFrom:
                 secretKeyRef:

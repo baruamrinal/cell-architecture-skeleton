@@ -7,14 +7,18 @@ export function ErrorNotice({ error }: { error: CombinedError | string | null | 
   if (!error) return null;
   const text = typeof error === "string" ? error : explain(describe(error));
   return (
-    <p role="alert" className="error">
+    <p role="alert" className="alert">
       {text}
     </p>
   );
 }
 
 export function Notice({ text }: { text: string | null }) {
-  return text ? <p role="status">{text}</p> : null;
+  return text ? (
+    <p role="status" className="notice">
+      {text}
+    </p>
+  ) : null;
 }
 
 interface PagerProps {
@@ -26,7 +30,7 @@ interface PagerProps {
 /** Cursor paging: "Next" while there is more; "First page" once past the first. */
 export function Pager({ nextCursor, onNext, onFirst }: PagerProps) {
   return (
-    <nav aria-label="pages">
+    <nav aria-label="pages" className="pager">
       {onFirst && (
         <button type="button" onClick={onFirst}>
           First page

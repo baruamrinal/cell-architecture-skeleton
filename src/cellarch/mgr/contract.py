@@ -19,7 +19,7 @@ from cellarch.common.sql import sqlite_url
 
 @dataclass(frozen=True)
 class Call:
-    service: str  # "user-account" or "order-processing"
+    service: str  # "cell-gateway", "user-account" or "order-processing"
     method: str
     path: str  # OpenAPI path template
     query: frozenset[str] = frozenset()
@@ -29,8 +29,10 @@ class Call:
 USER = frozenset({"id", "email", "name", "created_at"})
 ORDER = frozenset({"id", "user_id", "status", "lines", "total_cents", "created_at", "updated_at"})
 PAGE = frozenset({"items", "next_cursor"})
+SERVICES = ("cell-gateway", "user-account", "order-processing")
 
 CALLS = (
+    Call("cell-gateway", "get", "/v1/tenant", reads=frozenset({"tenant_id", "status", "cell"})),
     Call("user-account", "get", "/v1/users", frozenset({"limit", "cursor"}), PAGE),
     Call("user-account", "get", "/v1/users/{user_id}", reads=USER),
     Call("user-account", "post", "/v1/users", reads=USER),
@@ -42,14 +44,31 @@ CALLS = (
 )
 
 
+class _NoSecrets:
+    """The gateway's secrets, never used: only its OpenAPI is read."""
+
+    def __getattr__(self, name: str) -> Any:  # pragma: no cover - never called
+        raise AssertionError(f"contract check used secrets.{name}")
+
+
 def _openapi(service: str, directory: Path) -> dict[str, Any]:
+    from cellarch.data_plane.cell.app import CellSettings
+    from cellarch.data_plane.cell.app import create_app as cell_gateway
     from cellarch.services.common.settings import ServiceSettings
     from cellarch.services.order_processing.app import OrderSettings
     from cellarch.services.order_processing.app import create_app as order_processing
     from cellarch.services.user_account.app import create_app as user_account
 
     database = sqlite_url(directory / f"{service}.db")
-    if service == "user-account":
+    if service == "cell-gateway":
+        settings = CellSettings(
+            "contract",
+            str(directory / "gateway.db"),
+            "contract",
+            tenant_db_admin_url=sqlite_url(directory / "tenants"),
+        )
+        app = cell_gateway(settings, secrets=_NoSecrets())
+    elif service == "user-account":
         app = user_account(ServiceSettings("contract", "contract", database))
     else:
         app = order_processing(
@@ -70,7 +89,7 @@ def unmet() -> list[str]:
     """What mgr relies on that the tenant services no longer offer (empty: all good)."""
     problems: list[str] = []
     with tempfile.TemporaryDirectory() as directory:
-        specs = {s: _openapi(s, Path(directory)) for s in ("user-account", "order-processing")}
+        specs = {s: _openapi(s, Path(directory)) for s in SERVICES}
     for call in CALLS:
         spec = specs[call.service]
         operation = spec.get("paths", {}).get(call.path, {}).get(call.method)

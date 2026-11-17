@@ -5,6 +5,12 @@ export const MeQuery = graphql(`
     me {
       tenantId
       cellId
+      status
+      cell {
+        id
+        type
+        region
+      }
     }
   }
 `);

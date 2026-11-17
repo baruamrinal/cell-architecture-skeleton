@@ -1,6 +1,19 @@
+type Cell {
+  id: String!
+  type: CellType!
+  region: String!
+}
+
+enum CellType {
+  SHARED
+  DEDICATED
+}
+
 type Me {
   tenantId: String!
   cellId: String!
+  status: TenantStatus!
+  cell: Cell!
 }
 
 type Mutation {
@@ -49,6 +62,11 @@ type Query {
   user(id: ID!): User
   orders(userId: ID = null, first: Int! = 20, after: String = null): OrderPage!
   order(id: ID!): Order
+}
+
+enum TenantStatus {
+  ACTIVE
+  MOVING
 }
 
 type User {

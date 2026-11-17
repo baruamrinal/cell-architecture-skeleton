@@ -223,6 +223,7 @@ class TestDeploy:
         )
         helm = clusters.calls[2]
         assert (helm[1], helm[2], helm[3]["cellId"]) == ("cell-4", "cell", "cell-4")
+        assert helm[3]["cellType"] == "shared"  # the cell knows what it is
         assert len(helm[3]["secrets"]["internalToken"]) >= 32  # generated
         assert clusters.calls[3] == ("dns", ("cell-1", "cell-4"))
         # Registration failed, so the new cluster was removed again.

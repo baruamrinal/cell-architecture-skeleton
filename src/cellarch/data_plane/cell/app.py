@@ -63,6 +63,7 @@ RETRY_AFTER = {"Retry-After": "1"}
 READINESS_PROBE_TIMEOUT_SECONDS = 2.0
 READ_METHODS = frozenset({"GET", "HEAD"})
 FROZEN = "frozen"  # being moved: reads only
+CELL_TYPES = frozenset({"shared", "dedicated"})
 
 
 def _check_service_url(template: str) -> None:
@@ -86,9 +87,16 @@ class CellSettings:
     # The cell's mgr (web UI backend); /graphql is off without it.
     mgr_url: str | None = None
     mgr_token: str | None = field(default=None, repr=False)
+    # What the cell is, from its inputs (cells.yaml): told to the tenant's UI as is.
+    cell_type: str = "shared"
+    region: str = "local"
 
     def __post_init__(self) -> None:
         _check_service_url(self.tenant_service_url)
+        if self.cell_type not in CELL_TYPES:
+            raise ValueError(f"CELL_TYPE must be one of {sorted(CELL_TYPES)}")
+        if not self.region.strip():
+            raise ValueError("CELL_REGION must not be empty")
         open_tenant_databases(self.tenant_db_admin_url)  # validates the URL
 
     @classmethod
@@ -104,11 +112,27 @@ class CellSettings:
             stack_timeout_seconds=float(os.environ.get("STACK_TIMEOUT", "10")),
             mgr_url=os.environ.get("MGR_URL") or None,
             mgr_token=os.environ.get("MGR_TOKEN") or None,
+            cell_type=os.environ.get("CELL_TYPE", "shared"),
+            region=os.environ.get("CELL_REGION", "local"),
         )
 
 
 class TenantProvision(BaseModel):
     tenant_id: str = Field(pattern=TENANT_ID_PATTERN)
+
+
+class CellProfile(BaseModel):
+    id: str
+    type: str  # shared | dedicated
+    region: str
+
+
+class TenantProfile(BaseModel):
+    """The calling tenant as its cell sees it: answered by the cell alone."""
+
+    tenant_id: str
+    status: str  # active | moving (being moved to another cell: reads only)
+    cell: CellProfile
 
 
 class CellTenant(BaseModel):
@@ -177,7 +201,22 @@ def create_app(
     def healthz() -> dict[str, str]:
         return {"status": "ok", "cell_id": settings.cell_id}
 
-    # --- tenant API: forwarded to the tenant's own stack --------------------------------
+    # --- tenant API ----------------------------------------------------------------------
+
+    @app.get("/v1/tenant")
+    def tenant_profile(tenant: Tenant) -> TenantProfile:
+        """Whether the tenant is being moved, and the cell serving it (the web UI shows both)."""
+        entry = store.get_tenant(tenant)
+        status = entry["status"] if entry else None
+        if status not in ("active", FROZEN):
+            raise ApiError(503, "tenant_not_ready", "the tenant is being set up", RETRY_AFTER)
+        return TenantProfile(
+            tenant_id=tenant,
+            status="moving" if status == FROZEN else "active",
+            cell=CellProfile(id=settings.cell_id, type=settings.cell_type, region=settings.region),
+        )
+
+    # Forwarded to the tenant's own stack.
 
     async def forward(request: Request, tenant: str, resource: str, rest: str) -> Response:
         entry = store.get_tenant(tenant)

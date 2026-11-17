@@ -28,8 +28,9 @@ describe("signing in", () => {
     await userEvent.click(button);
 
     expect(await screen.findByText("usr_1@acme.test")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { level: 1, name: "acme" })).toBeInTheDocument();
-    expect(screen.getByText("served by cell-1")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "Users" })).toBeInTheDocument();
+    expect(screen.getByRole("banner")).toHaveTextContent("acme");
+    expect(screen.getByRole("contentinfo")).toHaveTextContent(/served by cell-1/i);
   });
 
   it("explains a failed sign-in", async () => {

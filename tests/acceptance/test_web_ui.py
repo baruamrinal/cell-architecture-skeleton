@@ -1,4 +1,4 @@
-"""Stage 4 acceptance tests: the tenant web UI (A87-A88)."""
+"""Stage 4 acceptance tests: the tenant web UI (A87-A88, A90)."""
 
 from __future__ import annotations
 
@@ -67,8 +67,8 @@ def _corepack() -> str | None:
     return None
 
 
-@pytest.mark.frontend
-def test_a88_the_ui_screens_show_the_tenants_data_and_run_its_changes() -> None:
+def _vitest(*args: str) -> str:
+    """Run the front end's Vitest suite (or the tests matching ``args``); its output."""
     corepack = _corepack()
     if corepack is None:
         pytest.skip("Node 24 with Corepack is not installed (see README: web UI)")
@@ -76,7 +76,7 @@ def test_a88_the_ui_screens_show_the_tenants_data_and_run_its_changes() -> None:
         pytest.skip("web-ui packages are not installed: run `corepack pnpm install` in web-ui/")
     command = corepack.split("|") if "|" in corepack else [corepack]
     result = subprocess.run(  # noqa: S603 - fixed command
-        [*command, "pnpm", "exec", "vitest", "run"],
+        [*command, "pnpm", "exec", "vitest", "run", *args],
         cwd=WEB_UI,
         env={**os.environ, "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0", "CI": "1"},
         capture_output=True,
@@ -85,4 +85,17 @@ def test_a88_the_ui_screens_show_the_tenants_data_and_run_its_changes() -> None:
         timeout=600,
     )
     assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-2000:]
-    assert "failed" not in result.stdout.lower().split("tests")[-1]
+    summary = result.stdout.lower().split("tests")[-1]
+    assert "failed" not in summary
+    return result.stdout
+
+
+@pytest.mark.frontend
+def test_a88_the_ui_screens_show_the_tenants_data_and_run_its_changes() -> None:
+    _vitest()
+
+
+@pytest.mark.frontend
+def test_a90_the_ui_shows_the_tenants_cell_and_a_move_in_progress() -> None:
+    output = _vitest("--coverage.enabled=false", "-t", "A90")
+    assert "passed" in output.lower()  # the A90 tests exist and ran

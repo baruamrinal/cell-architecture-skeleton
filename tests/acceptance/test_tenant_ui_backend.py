@@ -1,4 +1,4 @@
-"""Stage 4 acceptance tests: mgr, the web UI's GraphQL backend in every cell (A77-A86)."""
+"""Stage 4 acceptance tests: mgr, the web UI's GraphQL backend in every cell (A77-A86, A89)."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from .ui import (
     CREATE_USER,
     DELETE_USER,
     ME,
+    ME_AND_CELL,
     ORDER,
     USER,
     USERS,
@@ -305,3 +306,31 @@ def test_a86_the_schema_and_the_v1_contract_are_checked() -> None:
 def test_a86_mgr_uses_only_what_the_tenant_services_offer() -> None:
     missing = contract.unmet()
     assert missing == [], f"mgr relies on /v1 calls the tenant services don't offer: {missing}"
+
+
+def test_a89_the_ui_learns_its_cell_and_whether_its_tenant_is_being_moved(
+    platform: Platform, two_tenants: tuple[UiSession, UiSession]
+) -> None:
+    acme, _ = two_tenants
+    assert data(query(platform, acme, ME_AND_CELL))["me"] == {
+        "tenantId": "acme",
+        "status": "ACTIVE",
+        "cell": {"id": "cell-1", "type": "SHARED", "region": "local"},
+    }
+    seen: dict[str, object] = {}
+
+    def half_way(cell_id: str, tenant_id: str) -> None:
+        platform.clock.advance(ROUTE_CACHE_TTL + 1)
+        seen["me"] = query(platform, acme, ME_AND_CELL)
+
+    platform.move("acme", "cell-2", InProcessStacks(platform, after_install=half_way))
+    assert data(seen["me"])["me"]["status"] == "MOVING"  # type: ignore[arg-type]
+
+    # Promoted to a cell of its own, the tenant's UI says so: the cell knows its type.
+    assert platform.cellctl("tenants", "promote", "acme", "--cell", "cell-4") == 0
+    platform.clock.advance(ROUTE_CACHE_TTL + 1)
+    assert data(query(platform, acme, ME_AND_CELL))["me"] == {
+        "tenantId": "acme",
+        "status": "ACTIVE",
+        "cell": {"id": "cell-4", "type": "DEDICATED", "region": "local"},
+    }

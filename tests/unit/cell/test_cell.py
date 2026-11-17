@@ -548,3 +548,80 @@ class TestGraphqlForwarding:
         bare = make_cell(tmp_path / "bare", mgr=False)
         bare.onboard()
         assert bare.client.get("/graphql", headers={TENANT_HEADER: "acme"}).status_code == 404
+
+
+class TestTenantProfile:
+    """GET /v1/tenant: what the cell knows about the calling tenant and itself."""
+
+    def test_an_active_tenant_on_a_shared_cell(self, cell: Cell) -> None:
+        cell.onboard()
+        response = cell.client.get("/v1/tenant", headers={TENANT_HEADER: "acme"})
+        assert response.status_code == 200
+        assert response.json() == {
+            "tenant_id": "acme",
+            "status": "active",
+            "cell": {"id": "cell-x", "type": "shared", "region": "local"},
+        }
+        assert response.headers[CELL_HEADER] == "cell-x"
+
+    def test_a_frozen_tenant_is_moving(self, cell: Cell) -> None:
+        cell.onboard()
+        frozen = cell.client.post("/internal/tenants/acme/freeze", headers=INTERNAL)
+        assert frozen.status_code == 200
+        response = cell.client.get("/v1/tenant", headers={TENANT_HEADER: "acme"})
+        assert response.json()["status"] == "moving"
+
+    def test_a_tenant_still_being_set_up_is_not_ready(self, cell: Cell) -> None:
+        cell.provision()
+        response = cell.client.get("/v1/tenant", headers={TENANT_HEADER: "acme"})
+        assert (response.status_code, response.json()["error"]) == (503, "tenant_not_ready")
+
+    def test_a_tenant_the_cell_does_not_host(self, cell: Cell) -> None:
+        response = cell.client.get("/v1/tenant", headers={TENANT_HEADER: "globex"})
+        assert (response.status_code, response.json()["error"]) == (421, "tenant_not_in_cell")
+
+    def test_the_cell_reports_its_own_type_and_region(self, tmp_path: Path) -> None:
+        secrets, stacks = MemorySecrets(), StackHost()
+        app = create_app(
+            CellSettings(
+                cell_id="cell-x",
+                db_path=str(tmp_path / "c.db"),
+                internal_token=TOKEN,
+                tenant_db_admin_url=f"sqlite:///{tmp_path.as_posix()}/tenants",
+                tenant_service_url=stack_url_template("cell-x"),
+                cell_type="dedicated",
+                region="eu-west-1",
+            ),
+            secrets=secrets,
+            http_client=stacks.client(),
+        )
+        cell = Cell(TestClient(app), secrets, stacks, SqliteTenantDatabases(str(tmp_path)))
+        cell.onboard()
+        response = cell.client.get("/v1/tenant", headers={TENANT_HEADER: "acme"})
+        profile = response.json()["cell"]
+        assert profile == {"id": "cell-x", "type": "dedicated", "region": "eu-west-1"}
+
+
+class TestCellProfileSettings:
+    def test_type_and_region_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CELL_ID", "cell-7")
+        monkeypatch.setenv("CELL_INTERNAL_TOKEN", "t")
+        monkeypatch.setenv("TENANT_DB_ADMIN_URL", "sqlite:///./data/tenants")
+        monkeypatch.setenv("CELL_TYPE", "dedicated")
+        monkeypatch.setenv("CELL_REGION", "eu-west-1")
+        settings = CellSettings.from_env()
+        assert (settings.cell_type, settings.region) == ("dedicated", "eu-west-1")
+
+    def test_defaults_are_a_shared_local_cell(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CELL_ID", "cell-7")
+        monkeypatch.setenv("CELL_INTERNAL_TOKEN", "t")
+        monkeypatch.setenv("TENANT_DB_ADMIN_URL", "sqlite:///./data/tenants")
+        monkeypatch.delenv("CELL_TYPE", raising=False)
+        monkeypatch.delenv("CELL_REGION", raising=False)
+        settings = CellSettings.from_env()
+        assert (settings.cell_type, settings.region) == ("shared", "local")
+
+    @pytest.mark.parametrize(("field", "value"), [("cell_type", "huge"), ("region", "")])
+    def test_type_and_region_are_validated(self, tmp_path: Path, field: str, value: str) -> None:
+        with pytest.raises(ValueError, match="CELL_TYPE|CELL_REGION"):
+            CellSettings("c", str(tmp_path / "c.db"), "t", **{field: value})  # type: ignore[arg-type]
