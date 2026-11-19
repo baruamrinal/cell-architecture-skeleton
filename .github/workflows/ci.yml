@@ -55,7 +55,7 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Install Helm (chart tests)
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
         with:
           version: v4.3.1
 
@@ -112,7 +112,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: v4.3.1
 
